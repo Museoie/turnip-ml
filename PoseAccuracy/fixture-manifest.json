@@ -1,0 +1,39 @@
+{
+  "clips": [
+    {
+      "duration_s": 6.133,
+      "file": "IMG_9229.mov",
+      "fps": 60.0,
+      "height": 866,
+      "id": "IMG_9229",
+      "label": "double cartfull",
+      "sha256": "05568074c5fbabec29e90ff9827c44aa07d3adb19fe4dc3beabfd00403186ff2",
+      "source": "Hoie's iPhone tricking footage, Cloudflare R2 turnip-storage/turnip-ios-ci-fixtures/ via public r2.dev URL (NOT committed to git)",
+      "width": 1540
+    },
+    {
+      "duration_s": 7.797,
+      "file": "IMG_9420.mov",
+      "fps": 60.026,
+      "height": 1080,
+      "id": "IMG_9420",
+      "label": "hook - scoot - gainer - cartfull (combo)",
+      "sha256": "8fc531f43b3f6c1d2012c44f306169c11555a07a3b95a089f7a6f891cc8e5664",
+      "source": "Hoie's iPhone tricking footage, Cloudflare R2 turnip-storage/turnip-ios-ci-fixtures/ via public r2.dev URL (NOT committed to git)",
+      "width": 1920
+    },
+    {
+      "duration_s": 4.148,
+      "file": "IMG_9437.mov",
+      "fps": 60.266,
+      "height": 1080,
+      "id": "IMG_9437",
+      "label": "corkscrew",
+      "sha256": "fecdde036323fb5d117383b1872589a2b38a8d86f0475ac8958772dd7a897108",
+      "source": "Hoie's iPhone tricking footage, Cloudflare R2 turnip-storage/turnip-ios-ci-fixtures/ via public r2.dev URL (NOT committed to git)",
+      "width": 1920
+    }
+  ],
+  "target_fps": 10.0,
+  "version": 1
+}

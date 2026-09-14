@@ -1,0 +1,148 @@
+# Pose accuracy gate: every PR touching pose estimation gets a pose-accuracy score.
+#
+# Runs the MoveNet Thunder candidate poses over the fixed fixture clips and
+# compares the deterministic 0-100 score against PoseAccuracy/baseline.json.
+# Fails the check on regression beyond tolerance. A maintainer can override by
+# adding the `pose-accuracy-override` label to the PR and re-running.
+#
+# Deliberately ubuntu-only and Python-only: it must not duplicate the Xcode
+# build in ci.yml, and it must work on fork PRs (plain `pull_request`, never
+# `pull_request_target`).
+name: Pose accuracy gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'PoseAccuracy/**'
+      - '.github/workflows/pose-accuracy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pose-accuracy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: '3.12'
+  # Allowed drop below the baseline score (points on the 0-100 scale) before
+  # the gate fails. Small because the scorer is fully deterministic.
+  POSE_TOLERANCE: '0.5'
+  OVERRIDE_LABEL: 'pose-accuracy-override'
+
+jobs:
+  pose-accuracy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: PoseAccuracy/requirements.txt
+
+      - name: Install harness dependencies
+        run: pip install -r PoseAccuracy/requirements.txt
+
+      # Manual override: the `pose-accuracy-override` label on the PR turns the
+      # gate green and logs who added it and when. Resolved via the API (not
+      # the event payload) so re-runs after labeling are honored.
+      - name: Check for override label
+        id: override
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import json, os, urllib.request
+          repo = os.environ["GITHUB_REPOSITORY"]
+          event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+          pr = (event.get("pull_request") or {}).get("number")
+          label = os.environ["OVERRIDE_LABEL"]
+          overridden, info = False, ""
+          if pr:
+              base = f"https://api.github.com/repos/{repo}/issues/{pr}"
+              req = urllib.request.Request(
+                  base + "/labels",
+                  headers={"Accept": "application/vnd.github+json",
+                           "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                           "User-Agent": "turnip-pose-harness/1.0"})
+              labels = json.load(urllib.request.urlopen(req, timeout=30))
+              if any(l["name"] == label for l in labels):
+                  overridden = True
+                  # who/when: most recent "labeled" event for this label
+                  req = urllib.request.Request(
+                      base + "/events?per_page=100",
+                      headers={"Accept": "application/vnd.github+json",
+                               "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                               "User-Agent": "turnip-pose-harness/1.0"})
+                  for e in json.load(urllib.request.urlopen(req, timeout=30)):
+                      if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label:
+                          info = f"label added by {e['actor']['login']} at {e['created_at']}"
+                          break
+                  info = info or "label present (actor unknown)"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"overridden={'true' if overridden else 'false'}\n")
+              f.write(f"info={info}\n")
+          print(f"override: {overridden} {info}")
+          EOF
+
+      - name: Override short-circuit
+        if: steps.override.outputs.overridden == 'true'
+        run: |
+          echo "::notice::pose-accuracy gate overridden (${{ steps.override.outputs.info }}). Skipping fixture run."
+
+      # The fixture videos are Hoie's personal footage and are not committed.
+      # They live in his private Cloudflare R2 bucket (zero egress fees, so
+      # the per-run downloads cost nothing): fetch_fixture.py pulls each
+      # manifest clip as s3://<bucket>/<prefix><file> with the runner's
+      # preinstalled `aws` CLI and sha256-verifies it. The legacy
+      # POSE_FIXTURE_URLS variable still works if set. With neither source
+      # configured, the job FAILS loudly (never silently passes).
+      - name: Fetch fixture clips
+        if: steps.override.outputs.overridden != 'true'
+        env:
+          # Public R2 URLs are the default fixture source (sha256-verified
+          # against the manifest, so the URL itself is untrusted-safe).
+          # A POSE_FIXTURE_URLS repo variable overrides this (e.g. a mirror).
+          # The default must work with zero configuration: fork-PR workflows
+          # cannot see repo secrets, so no secret may be required here.
+          POSE_FIXTURE_URLS: ${{ vars.POSE_FIXTURE_URLS || 'https://pub-148f067d46a94f8394f3b7a72ebd2a3e.r2.dev/turnip-ios-ci-fixtures/IMG_9229.mov https://pub-148f067d46a94f8394f3b7a72ebd2a3e.r2.dev/turnip-ios-ci-fixtures/IMG_9420.mov https://pub-148f067d46a94f8394f3b7a72ebd2a3e.r2.dev/turnip-ios-ci-fixtures/IMG_9437.mov' }}
+          POSE_FIXTURE_R2_BUCKET: turnip-storage
+          POSE_FIXTURE_R2_PREFIX: turnip-ios-ci-fixtures/
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+        run: |
+          python PoseAccuracy/ci/fetch_fixture.py \
+            PoseAccuracy/fixture-manifest.json "$RUNNER_TEMP/fixture"
+
+      - name: Run MoveNet candidate extraction
+        if: steps.override.outputs.overridden != 'true'
+        run: |
+          python PoseAccuracy/movenet_infer.py \
+            --manifest PoseAccuracy/fixture-manifest.json \
+            --frames-dir "$RUNNER_TEMP/fixture" \
+            --drop-frames PoseAccuracy/reference-poses/dropped-frames.json \
+            --model-url "${{ vars.POSE_MODEL_URL }}" \
+            --out "$RUNNER_TEMP/candidate.json"
+
+      - name: Score and enforce gate
+        if: steps.override.outputs.overridden != 'true'
+        run: |
+          python PoseAccuracy/scorer.py \
+            --reference PoseAccuracy/reference-poses/reference.json \
+            --candidate "$RUNNER_TEMP/candidate.json" \
+            --model-id "movenet-thunder-int8/kaggle-singlepose-thunder-tflite-int8-1/sha256:b72fed22707cd6fb94b5a248b9bddb9c062b9f445471b4fa263407cf6d222011" \
+            --manifest-sha "$(python -c "import hashlib; print(hashlib.sha256(open('PoseAccuracy/fixture-manifest.json','rb').read()).hexdigest())")" \
+            --out "$RUNNER_TEMP/result.json"
+          python PoseAccuracy/ci/check_gate.py \
+            --result "$RUNNER_TEMP/result.json" \
+            --baseline PoseAccuracy/baseline.json \
+            --tolerance "$POSE_TOLERANCE" \
+            --override false
