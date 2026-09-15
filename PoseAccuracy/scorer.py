@@ -31,18 +31,37 @@ Input JSON schema:
   {"clips": {"<clip_id>": {"frames": [{"frame_index": int, "t": float,
      "joints": [{"x": float, "y": float, "c": float} x17]}]}}}
 """
-from __future__ import annotations
-import argparse, json, math, sys
 
-JOINT_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",
-               "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-               "left_wrist", "right_wrist", "left_hip", "right_hip",
-               "left_knee", "right_knee", "left_ankle", "right_ankle"]
+from __future__ import annotations
+
+import argparse
+import json
+import math
+
+JOINT_NAMES = [
+    "nose",
+    "left_eye",
+    "right_eye",
+    "left_ear",
+    "right_ear",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle",
+]
 assert len(JOINT_NAMES) == 17
 
 W_DISP, W_CONF = 0.85, 0.15
-MISS_ND = 0.6          # normalized displacement that scores zero
-MIN_SCALE = 0.05       # clamp for person scale
+MISS_ND = 0.6  # normalized displacement that scores zero
+MIN_SCALE = 0.05  # clamp for person scale
 ROUND = 4
 
 SCORER_VERSION = "1.0.0"
@@ -63,8 +82,7 @@ def score_frame(ref_joints, cand_joints):
     scale = max(MIN_SCALE, scale)
     per_joint = []
     for j in range(17):
-        d = math.hypot(cand_joints[j]["x"] - r[j]["x"],
-                       cand_joints[j]["y"] - r[j]["y"])
+        d = math.hypot(cand_joints[j]["x"] - r[j]["x"], cand_joints[j]["y"] - r[j]["y"])
         nd = d / scale
         q_disp = max(0.0, 1.0 - nd / MISS_ND)
         q_conf = 1.0 - abs(cand_joints[j]["c"] - r[j]["c"])
@@ -81,14 +99,18 @@ def score_all(reference, candidate):
     ref_clips = reference["clips"]
     cand_clips = candidate["clips"]
     if sorted(ref_clips) != sorted(cand_clips):
-        raise SystemExit(f"clip id mismatch: ref={sorted(ref_clips)} cand={sorted(cand_clips)}")
+        raise SystemExit(
+            f"clip id mismatch: ref={sorted(ref_clips)} cand={sorted(cand_clips)}"
+        )
     per_clip = {}
     joint_accum = {name: [] for name in JOINT_NAMES}
     for clip_id in sorted(ref_clips):
         rf = ref_clips[clip_id]["frames"]
         cf = cand_clips[clip_id]["frames"]
         if len(rf) != len(cf):
-            raise SystemExit(f"frame count mismatch in {clip_id}: {len(rf)} vs {len(cf)}")
+            raise SystemExit(
+                f"frame count mismatch in {clip_id}: {len(rf)} vs {len(cf)}"
+            )
         frame_scores = []
         clip_joint = {name: [] for name in JOINT_NAMES}
         for rfr, cfr in zip(rf, cf):
@@ -103,7 +125,9 @@ def score_all(reference, candidate):
         per_clip[clip_id] = {
             "score": r4(clip_score * 100),
             "n_frames": len(frame_scores),
-            "per_joint": {n: r4(sum(v) / len(v) * 100) for n, v in sorted(clip_joint.items())},
+            "per_joint": {
+                n: r4(sum(v) / len(v) * 100) for n, v in sorted(clip_joint.items())
+            },
         }
     total = sum(c["score"] for c in per_clip.values()) / len(per_clip)
     return {
@@ -111,8 +135,9 @@ def score_all(reference, candidate):
         "scorer_version": SCORER_VERSION,
         "n_clips": len(per_clip),
         "per_clip": per_clip,
-        "per_joint_overall": {n: r4(sum(v) / len(v) * 100)
-                              for n, v in sorted(joint_accum.items())},
+        "per_joint_overall": {
+            n: r4(sum(v) / len(v) * 100) for n, v in sorted(joint_accum.items())
+        },
     }
 
 
