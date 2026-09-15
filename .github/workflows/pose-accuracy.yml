@@ -49,6 +49,12 @@ jobs:
       - name: Install harness dependencies
         run: pip install -r PoseAccuracy/requirements.txt
 
+      # Scorer unit tests are stdlib-only and hermetic (synthetic landmarks,
+      # no network, no model download), so they run before the heavy fixture
+      # steps and fail fast on logic regressions.
+      - name: Run scorer unit tests
+        run: python -m unittest discover -s PoseAccuracy/tests -t .
+
       # Manual override: the `pose-accuracy-override` label on the PR turns the
       # gate green and logs who added it and when. Resolved via the API (not
       # the event payload) so re-runs after labeling are honored.

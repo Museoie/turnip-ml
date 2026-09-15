@@ -82,6 +82,8 @@ def score_all(reference, candidate):
     cand_clips = candidate["clips"]
     if sorted(ref_clips) != sorted(cand_clips):
         raise SystemExit(f"clip id mismatch: ref={sorted(ref_clips)} cand={sorted(cand_clips)}")
+    if not ref_clips:
+        raise ValueError("no clips to score: both inputs have empty 'clips'")
     per_clip = {}
     joint_accum = {name: [] for name in JOINT_NAMES}
     for clip_id in sorted(ref_clips):
@@ -89,6 +91,8 @@ def score_all(reference, candidate):
         cf = cand_clips[clip_id]["frames"]
         if len(rf) != len(cf):
             raise SystemExit(f"frame count mismatch in {clip_id}: {len(rf)} vs {len(cf)}")
+        if not rf:
+            raise ValueError(f"clip {clip_id!r} has no frames to score")
         frame_scores = []
         clip_joint = {name: [] for name in JOINT_NAMES}
         for rfr, cfr in zip(rf, cf):
