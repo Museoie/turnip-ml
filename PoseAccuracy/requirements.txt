@@ -1,0 +1,6 @@
+# Pinned CI dependencies for the pose-accuracy gate.
+# Keep these pinned: the scorer is fully deterministic and the gate compares
+# against a fixed baseline, so dependency drift must not move the score.
+ai-edge-litert==2.2.0
+numpy==2.5.3
+opencv-python-headless==5.0.0.93
