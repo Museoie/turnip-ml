@@ -1,0 +1,24 @@
+# Full-run config template for Training/train.py (turnip-ml#13).
+# Copy to Training/config/full.local.toml (git-ignored scratch) and point it
+# at a real export: manifest.jsonl from the farm, split.json from
+# split_dataset.py. Runs on the droplet during MVP; set compute = "gpu" on
+# the GPU worker. See Training/README.md "Full run".
+seed = 0
+
+compute = "cpu"
+
+# Real data locations (NOT committed): farm export + #12 split output.
+split_path = "data/split.json"
+samples_dir = "data/samples"
+out_dir = "runs/full"
+
+window_frames = 16
+window_stride = 8
+
+learning_rate = 0.1
+epochs = 500
+l2 = 0.0001
+
+# Fine-tune the current champion instead of training from scratch:
+# init_checkpoint = "runs/champion/model.npz"
+init_checkpoint = ""

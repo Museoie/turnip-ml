@@ -23,5 +23,9 @@ datasets/
 # Jupyter
 .ipynb_checkpoints/
 
+# Local full-run training configs (see Training/config/full.toml) — real
+# data paths and droplet hyperparameters; never committed.
+Training/config/*.local.toml
+
 # OS
 .DS_Store
