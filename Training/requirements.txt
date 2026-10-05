@@ -1,0 +1,5 @@
+# Pinned training-pipeline dependencies (turnip-ml#13).
+# Keep these pinned: training runs must be reproducible, and the smoke test
+# in CI must not drift with dependency releases. numpy matches the
+# PoseAccuracy pin so the repo has a single numpy version.
+numpy==2.5.3

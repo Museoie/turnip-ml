@@ -1,0 +1,10 @@
+{
+  "smoke-001": "train",
+  "smoke-002": "train",
+  "smoke-003": "train",
+  "smoke-004": "train",
+  "smoke-005": "val",
+  "smoke-006": "val",
+  "smoke-007": "train",
+  "smoke-008": "train"
+}
