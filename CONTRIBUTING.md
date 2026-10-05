@@ -41,7 +41,7 @@ This file is the pointer doc; the READMEs above are the source of truth.
 
 3. **Trick labels come from Hoie — never inferred from footage.** Do not
    guess what trick a clip shows; the labels in
-   `fixture-manifest.json` are his words.
+   `PoseAccuracy/fixture-manifest.json` are his words.
 
 4. **Large artifacts are never committed.** No model binaries, datasets,
    or videos in git. Fixture videos are fetched from the public R2 URLs
