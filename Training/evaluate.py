@@ -1,4 +1,4 @@
-"""Holdout evaluation for the trick-detection model (turnip-ml#14).
+"""Holdout evaluation for the trick-detection model.
 
 Compares predicted trick segments against ground-truth annotations on the
 holdout split and writes a deterministic JSON report next to the model
@@ -13,7 +13,7 @@ Inputs
                 "name": "a+b" | "names": ["a", "b"], "is_combo": bool?}.
                 "background" is not a segment: absence of a segment means
                 background.
---split         split.json from Training/split_dataset.py (turnip-ml#12):
+--split         split.json from Training/split_dataset.py:
                 sample_id -> "train" | "val" | "holdout".
 --samples-dir   directory of per-sample JSON files ("<sample_id>.json")
                 carrying the ground-truth "tricks" list:
@@ -107,6 +107,8 @@ def sha256_file(path: Path) -> str:
 def normalize_names(seg: dict[str, Any], where: str) -> frozenset[str]:
     """Ground-truth and prediction segments may carry "name" ("a+b") or
     "names" (["a", "b"]); both normalize to the same frozenset."""
+    if "name" in seg and "names" in seg:
+        _fail(f'{where}: segment has both "name" and "names"; use exactly one')
     if "names" in seg:
         raw = seg["names"]
         if not isinstance(raw, list) or not raw or not all(
@@ -118,7 +120,10 @@ def normalize_names(seg: dict[str, Any], where: str) -> frozenset[str]:
         raw = seg["name"]
         if not isinstance(raw, str) or not raw:
             _fail(f'{where}: "name" must be a non-empty string')
-        names = frozenset(raw.split("+"))
+        parts = raw.split("+")
+        if any(not p for p in parts):
+            _fail(f'{where}: "name" has an empty component in {raw!r}')
+        names = frozenset(parts)
     else:
         _fail(f'{where}: segment needs "name" or "names"')
     if "is_combo" in seg and bool(seg["is_combo"]) != (len(names) > 1):

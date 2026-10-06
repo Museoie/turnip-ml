@@ -1,4 +1,4 @@
-"""Unit tests for Training/evaluate.py (turnip-ml#14).
+"""Unit tests for Training/evaluate.py.
 
 Run: python -m unittest discover -s Training/tests -t .
 """
@@ -125,17 +125,54 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(out.read_bytes(), first)
 
     def test_iou_threshold_boundary(self) -> None:
-        # GT 4..20 (len 16); pred 14..24 overlaps 6 frames -> IoU 6/26 ~= 0.23.
+        # GT 4..20 (len 16); pred 14..24 (len 10) overlaps 6 frames:
+        # IoU = 6 / (16 + 10 - 6) = 6/20 = 0.3. Threshold 0.25 detects it,
+        # but the no-intersection-subtraction mutant (IoU = 6/26 ~= 0.23)
+        # stays below 0.25, so the subtraction in temporal_iou is guarded.
         self._basic_holdout()
         self._predictions(
             {"h1": [{"start_frame": 14, "end_frame": 24, "name": "gainer"}]}
         )
         default = self._run()
         self.assertEqual(default["n_detections"], 0)
-        lowered = self._run("--iou-threshold", "0.2")
-        self.assertEqual(lowered["iou_threshold"], 0.2)
+        lowered = self._run("--iou-threshold", "0.25")
+        self.assertEqual(lowered["iou_threshold"], 0.25)
         self.assertEqual(lowered["n_detections"], 1)
         self.assertEqual(lowered["n_name_matches"], 1)
+
+    def test_greedy_best_iou_matching(self) -> None:
+        # GT (0,10)/gainer with competing preds (0,6)/cork (IoU 0.6) and
+        # (0,9)/gainer (IoU 0.9): greedy best-IoU matches gainer and keeps
+        # the name match; first-fit would match cork and lose it.
+        self._sample(
+            "h1", [{"name": "gainer", "start_frame": 0, "end_frame": 10}]
+        )
+        self._split({"h1": "holdout"})
+        self._predictions(
+            {
+                "h1": [
+                    {"start_frame": 0, "end_frame": 6, "name": "cork"},
+                    {"start_frame": 0, "end_frame": 9, "name": "gainer"},
+                ]
+            }
+        )
+        report = self._run()
+        self.assertEqual(report["n_detections"], 1)
+        self.assertEqual(report["n_name_matches"], 1)
+        self.assertEqual(report["n_unmatched_predictions"], 1)
+
+    def test_iou_threshold_boundary_is_inclusive(self) -> None:
+        # GT (4,20) vs pred (12,20): overlap 8, union 16 + 8 - 8 = 16,
+        # IoU = 8/16 = 0.5 exactly. The spec'd "IoU >= threshold" detects at
+        # threshold 0.5; a strict ">" would drop it.
+        self._sample("h1", [{"name": "gainer", "start_frame": 4, "end_frame": 20}])
+        self._split({"h1": "holdout"})
+        self._predictions(
+            {"h1": [{"start_frame": 12, "end_frame": 20, "name": "gainer"}]}
+        )
+        report = self._run()
+        self.assertEqual(report["n_detections"], 1)
+        self.assertEqual(report["n_name_matches"], 1)
 
     def test_name_mismatch_is_detection_not_match(self) -> None:
         self._basic_holdout()
@@ -240,6 +277,45 @@ class EvaluateTest(unittest.TestCase):
                     }
                 ]
             }
+        )
+        with self.assertRaises(ValueError):
+            evaluate.main(
+                [
+                    "--predictions", str(self.pred_path),
+                    "--split", str(self.split_path),
+                    "--samples-dir", str(self.samples_dir),
+                    "--out", str(self.tmp / "report.json"),
+                ]
+            )
+
+    def test_name_and_names_together_rejected(self) -> None:
+        self._basic_holdout()
+        self._predictions(
+            {
+                "h1": [
+                    {
+                        "start_frame": 4,
+                        "end_frame": 20,
+                        "name": "gainer",
+                        "names": ["cork"],
+                    }
+                ]
+            }
+        )
+        with self.assertRaises(ValueError):
+            evaluate.main(
+                [
+                    "--predictions", str(self.pred_path),
+                    "--split", str(self.split_path),
+                    "--samples-dir", str(self.samples_dir),
+                    "--out", str(self.tmp / "report.json"),
+                ]
+            )
+
+    def test_empty_name_component_rejected(self) -> None:
+        self._basic_holdout()
+        self._predictions(
+            {"h1": [{"start_frame": 4, "end_frame": 20, "name": "gainer+"}]}
         )
         with self.assertRaises(ValueError):
             evaluate.main(
