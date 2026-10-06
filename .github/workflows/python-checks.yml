@@ -16,6 +16,7 @@ on:
     branches: [main]
     paths:
       - '**.py'
+      - 'pyproject.toml'
       - '.github/workflows/python-checks.yml'
   workflow_dispatch:
 
