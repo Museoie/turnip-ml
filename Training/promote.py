@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Champion/challenger promotion gate (turnip-ml#15).
+
+ML pipeline step 6 (turnip-ios docs/DESIGN.md, Backend / ML pipeline):
+promote the challenger only if it beats the current champion by >=1% on
+validation; otherwise archive it and try next cycle. The decision
+(metrics, timestamps) is recorded in the model registry.
+
+Inputs
+------
+--champion    metrics.json from Training/train.py for the current champion.
+--challenger  metrics.json from Training/train.py for the challenger.
+--metric      validation metric key present in both files.
+              Default: val_accuracy.
+--threshold   minimum *relative* improvement required to promote, as a
+              fraction. Default: 0.01 (the issue's ">=1%").
+--registry    model-registry stand-in: a JSON array file each decision
+              record is appended to. Default: Training/registry.json.
+              The real registry is turnip-farm#10's POST /api/models; until
+              it exists this file is the audit trail the nightly trigger
+              (turnip-ml#16) reads.
+
+Decision rule
+-------------
+    improvement = (challenger - champion) / champion      (champion != 0)
+Promote iff improvement >= threshold. When the champion's metric is 0,
+promote iff the challenger's metric is > 0; 0-vs-0 is "no improvement"
+and archives.
+
+Exit codes: 0 = promote, 3 = archive, 2 = input/usage error (fail closed).
+
+Determinism
+-----------
+The decision is a pure function of the two metric values and the
+threshold. The registry record carries a wall-clock `decided_at` timestamp
+by design (a registry is a log, not a reproducible artifact); everything
+else is derived from the inputs. Floats are rounded to 6 decimals in the
+record.
+
+Fail closed
+-----------
+Missing/unreadable files, invalid JSON, a missing or non-numeric
+(non-finite) metric, or a malformed existing registry file are errors,
+never silently treated as "archive" or "promote".
+
+Concurrency note: two gate runs appending to the same registry file at
+once can interleave; the nightly trigger (#16) runs one gate at a time,
+so this is not a concern for the current pipeline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+EXIT_PROMOTE = 0
+EXIT_ARCHIVE = 3
+EXIT_ERROR = 2
+
+DEFAULT_METRIC = "val_accuracy"
+DEFAULT_THRESHOLD = 0.01
+DEFAULT_REGISTRY = "Training/registry.json"
+
+
+class GateError(Exception):
+    """Input/usage error: the gate refuses to decide rather than guess."""
+
+
+def load_metrics(path: Path) -> dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        raise GateError(f"cannot read metrics JSON from {path}: {e}")
+    if not isinstance(data, dict):
+        raise GateError(f"metrics file {path} must contain a JSON object")
+    return data
+
+
+def metric_value(metrics: dict[str, Any], name: str, path: Path) -> float:
+    if name not in metrics:
+        raise GateError(f"metric {name!r} missing from {path}")
+    value = metrics[name]
+    # bool is a subclass of int: True/False are not metrics.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GateError(f"metric {name!r} in {path} is not a number: {value!r}")
+    if not math.isfinite(value):
+        raise GateError(f"metric {name!r} in {path} is not finite: {value!r}")
+    return float(value)
+
+
+def decide(champion: float, challenger: float, threshold: float) -> tuple[str, float, str]:
+    """Pure decision function.
+
+    Returns (decision, improvement, reason) with decision "promote" or
+    "archive". `improvement` is the relative improvement; for the
+    0-vs-0 case it is reported as 0.0.
+    """
+    if champion == 0.0:
+        if challenger > 0.0:
+            return ("promote", float("inf"),
+                    f"champion {DEFAULT_METRIC}=0, challenger={challenger:.6f} > 0")
+        return ("archive", 0.0,
+                f"champion {DEFAULT_METRIC}=0, challenger={challenger:.6f}: no improvement")
+    improvement = (challenger - champion) / abs(champion)
+    if improvement >= threshold:
+        return ("promote", improvement,
+                f"relative improvement {improvement:.4%} >= threshold {threshold:.4%}")
+    return ("archive", improvement,
+            f"relative improvement {improvement:.4%} < threshold {threshold:.4%}")
+
+
+def load_registry(path: Path) -> list[Any]:
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        raise GateError(f"cannot read registry file {path}: {e}")
+    if not isinstance(data, list):
+        raise GateError(f"registry file {path} must contain a JSON array")
+    return data
+
+
+def run(champion_path: Path, challenger_path: Path, metric: str,
+        threshold: float, registry_path: Path) -> tuple[dict[str, Any], int]:
+    """Evaluate the gate. Returns (decision_record, exit_code)."""
+    champion_metrics = load_metrics(champion_path)
+    challenger_metrics = load_metrics(challenger_path)
+    champion_v = metric_value(champion_metrics, metric, champion_path)
+    challenger_v = metric_value(challenger_metrics, metric, challenger_path)
+
+    decision, improvement, reason = decide(champion_v, challenger_v, threshold)
+    record = {
+        "decided_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "metric": metric,
+        "threshold": round(threshold, 6),
+        "champion_metric": round(champion_v, 6),
+        "challenger_metric": round(challenger_v, 6),
+        "improvement": (round(improvement, 6)
+                        if math.isfinite(improvement) else "inf"),
+        "decision": decision,
+        "reason": reason,
+        "champion_metrics": champion_metrics,
+        "challenger_metrics": challenger_metrics,
+    }
+
+    registry = load_registry(registry_path)
+    registry.append(record)
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(registry_path, "w", encoding="utf-8") as fh:
+        json.dump(registry, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+
+    return record, EXIT_PROMOTE if decision == "promote" else EXIT_ARCHIVE
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Champion/challenger promotion gate.")
+    p.add_argument("--champion", required=True, type=Path,
+                   help="metrics.json for the current champion")
+    p.add_argument("--challenger", required=True, type=Path,
+                   help="metrics.json for the challenger")
+    p.add_argument("--metric", default=DEFAULT_METRIC,
+                   help=f"validation metric key (default: {DEFAULT_METRIC})")
+    p.add_argument("--threshold", default=DEFAULT_THRESHOLD, type=float,
+                   help="minimum relative improvement to promote "
+                        f"(default: {DEFAULT_THRESHOLD})")
+    p.add_argument("--registry", default=Path(DEFAULT_REGISTRY), type=Path,
+                   help=f"registry file to append the decision to "
+                        f"(default: {DEFAULT_REGISTRY})")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    try:
+        if args.threshold < 0:
+            raise GateError(f"threshold must be >= 0, got {args.threshold}")
+        record, code = run(args.champion, args.challenger, args.metric,
+                           args.threshold, args.registry)
+    except GateError as e:
+        print(f"promote: error: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    print(json.dumps(record, indent=2, sort_keys=True))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
