@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Champion/challenger promotion gate (turnip-ml#15).
+"""Champion/challenger promotion gate.
 
-ML pipeline step 6 (turnip-ios docs/DESIGN.md, Backend / ML pipeline):
-promote the challenger only if it beats the current champion by >=1% on
-validation; otherwise archive it and try next cycle. The decision
-(metrics, timestamps) is recorded in the model registry.
+ML pipeline step 6: promote the challenger only if it beats the current
+champion by >=1% on validation; otherwise archive it and try next cycle.
+The decision (metrics, timestamps) is recorded in the model registry.
 
 Inputs
 ------
@@ -13,12 +12,11 @@ Inputs
 --metric      validation metric key present in both files.
               Default: val_accuracy.
 --threshold   minimum *relative* improvement required to promote, as a
-              fraction. Default: 0.01 (the issue's ">=1%").
+              fraction. Default: 0.01 (">=1%").
 --registry    model-registry stand-in: a JSON array file each decision
               record is appended to. Default: Training/registry.json.
-              The real registry is turnip-farm#10's POST /api/models; until
-              it exists this file is the audit trail the nightly trigger
-              (turnip-ml#16) reads.
+              This file is the audit trail the scheduled nightly trigger
+              reads.
 
 Decision rule
 -------------
@@ -40,12 +38,13 @@ record.
 Fail closed
 -----------
 Missing/unreadable files, invalid JSON, a missing or non-numeric
-(non-finite) metric, or a malformed existing registry file are errors,
-never silently treated as "archive" or "promote".
+(non-finite) metric, a non-finite or negative threshold, or a malformed
+existing registry file are errors, never silently treated as "archive"
+or "promote".
 
 Concurrency note: two gate runs appending to the same registry file at
-once can interleave; the nightly trigger (#16) runs one gate at a time,
-so this is not a concern for the current pipeline.
+once can interleave; the nightly scheduled trigger runs one gate at a
+time, so this is not a concern for the current pipeline.
 """
 
 from __future__ import annotations
@@ -94,19 +93,22 @@ def metric_value(metrics: dict[str, Any], name: str, path: Path) -> float:
     return float(value)
 
 
-def decide(champion: float, challenger: float, threshold: float) -> tuple[str, float, str]:
+def decide(champion: float, challenger: float, threshold: float,
+           metric: str) -> tuple[str, float, str]:
     """Pure decision function.
 
     Returns (decision, improvement, reason) with decision "promote" or
     "archive". `improvement` is the relative improvement; for the
-    0-vs-0 case it is reported as 0.0.
+    0-vs-0 case it is reported as 0.0. `metric` is the validation metric
+    name, used in the zero-champion reason strings so the registry record
+    names the metric actually compared.
     """
     if champion == 0.0:
         if challenger > 0.0:
             return ("promote", float("inf"),
-                    f"champion {DEFAULT_METRIC}=0, challenger={challenger:.6f} > 0")
+                    f"champion {metric}=0, challenger={challenger:.6f} > 0")
         return ("archive", 0.0,
-                f"champion {DEFAULT_METRIC}=0, challenger={challenger:.6f}: no improvement")
+                f"champion {metric}=0, challenger={challenger:.6f}: no improvement")
     improvement = (challenger - champion) / abs(champion)
     if improvement >= threshold:
         return ("promote", improvement,
@@ -136,7 +138,7 @@ def run(champion_path: Path, challenger_path: Path, metric: str,
     champion_v = metric_value(champion_metrics, metric, champion_path)
     challenger_v = metric_value(challenger_metrics, metric, challenger_path)
 
-    decision, improvement, reason = decide(champion_v, challenger_v, threshold)
+    decision, improvement, reason = decide(champion_v, challenger_v, threshold, metric)
     record = {
         "decided_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "metric": metric,
@@ -181,8 +183,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
-        if args.threshold < 0:
-            raise GateError(f"threshold must be >= 0, got {args.threshold}")
+        if not math.isfinite(args.threshold) or args.threshold < 0:
+            raise GateError(f"threshold must be a finite number >= 0, got {args.threshold}")
         record, code = run(args.champion, args.challenger, args.metric,
                            args.threshold, args.registry)
     except GateError as e:

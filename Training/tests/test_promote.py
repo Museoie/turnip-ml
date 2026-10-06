@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for Training/promote.py (turnip-ml#15).
+"""Unit tests for Training/promote.py.
 
 Fast and hermetic: synthetic metric fixtures only, no network, no model.
 Run with:  python -m unittest discover -s Training/tests -t .
@@ -18,40 +18,50 @@ from promote import EXIT_ARCHIVE, EXIT_ERROR, EXIT_PROMOTE, decide  # noqa: E402
 class DecideTest(unittest.TestCase):
     def test_promote_clear_win(self):
         # 0.80 -> 0.82 is +2.5% relative, above the 1% threshold.
-        decision, improvement, _ = decide(0.80, 0.82, 0.01)
+        decision, improvement, _ = decide(0.80, 0.82, 0.01, "val_accuracy")
         self.assertEqual(decision, "promote")
         self.assertAlmostEqual(improvement, 0.025)
 
     def test_promote_exact_boundary(self):
         # improvement == threshold promotes (>=).
-        decision, improvement, _ = decide(1.0, 1.01, 0.01)
+        decision, improvement, _ = decide(1.0, 1.01, 0.01, "val_accuracy")
         self.assertEqual(decision, "promote")
         self.assertGreaterEqual(improvement, 0.01)
 
     def test_archive_below_threshold(self):
         # 0.80 -> 0.805 is +0.625% relative: real gain, not enough.
-        decision, improvement, _ = decide(0.80, 0.805, 0.01)
+        decision, improvement, _ = decide(0.80, 0.805, 0.01, "val_accuracy")
         self.assertEqual(decision, "archive")
         self.assertLess(improvement, 0.01)
 
     def test_archive_regression(self):
-        decision, improvement, _ = decide(0.80, 0.75, 0.01)
+        decision, improvement, _ = decide(0.80, 0.75, 0.01, "val_accuracy")
         self.assertEqual(decision, "archive")
         self.assertLess(improvement, 0.0)
 
     def test_zero_champion_positive_challenger_promotes(self):
-        decision, _, _ = decide(0.0, 0.30, 0.01)
+        decision, _, _ = decide(0.0, 0.30, 0.01, "val_accuracy")
         self.assertEqual(decision, "promote")
 
     def test_zero_vs_zero_archives(self):
-        decision, improvement, _ = decide(0.0, 0.0, 0.01)
+        decision, improvement, _ = decide(0.0, 0.0, 0.01, "val_accuracy")
         self.assertEqual(decision, "archive")
         self.assertEqual(improvement, 0.0)
 
+    def test_zero_champion_reason_uses_actual_metric(self):
+        # The registry is the audit trail: the reason must name the metric
+        # actually compared, not the default metric name.
+        _, _, reason = decide(0.0, 0.78, 0.01, "val_f1")
+        self.assertIn("val_f1", reason)
+        self.assertNotIn("val_accuracy", reason)
+        _, _, reason = decide(0.0, 0.0, 0.01, "val_f1")
+        self.assertIn("val_f1", reason)
+        self.assertNotIn("val_accuracy", reason)
+
     def test_custom_threshold(self):
         # +2.5% passes 1% but not 5%.
-        self.assertEqual(decide(0.80, 0.82, 0.05)[0], "archive")
-        self.assertEqual(decide(0.80, 0.85, 0.05)[0], "promote")
+        self.assertEqual(decide(0.80, 0.82, 0.05, "val_accuracy")[0], "archive")
+        self.assertEqual(decide(0.80, 0.85, 0.05, "val_accuracy")[0], "promote")
 
 
 class RunTest(unittest.TestCase):
@@ -174,6 +184,20 @@ class RunTest(unittest.TestCase):
         with self.assertRaises(promote.GateError):
             promote.run(champion, challenger, "val_accuracy",
                         0.01, self.registry)
+
+    def test_non_finite_threshold_rejected(self):
+        # A nan/inf threshold must fail closed (exit 2), never silently
+        # archive or corrupt the registry with an Infinity threshold.
+        champion = self.write_metrics("champion.json", val_accuracy=0.80)
+        challenger = self.write_metrics("challenger.json", val_accuracy=0.95)
+        for bad in ("nan", "inf"):
+            with self.subTest(threshold=bad):
+                code = promote.main(["--champion", str(champion),
+                                     "--challenger", str(challenger),
+                                     "--threshold", bad,
+                                     "--registry", str(self.registry)])
+                self.assertEqual(code, EXIT_ERROR)
+        self.assertFalse(self.registry.exists())  # nothing recorded
 
     def test_main_exit_codes(self):
         champion = self.write_metrics("champion.json", val_accuracy=0.80)
