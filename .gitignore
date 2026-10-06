@@ -19,6 +19,7 @@ venv/
 # Data
 data/
 datasets/
+runs/
 
 # Local run artifacts (never commit decision logs)
 Training/registry.json
