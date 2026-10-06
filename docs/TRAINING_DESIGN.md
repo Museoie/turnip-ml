@@ -1,0 +1,339 @@
+# Trick-Detection Training Design (`turnip-ml`)
+
+**Scope.** This document is the training-side detailed design for `turnip-ml`,
+implementing §6 of the master plan
+(`https://github.com/hoiekim/turnip-farm/blob/main/docs/MASTER_PLAN.md`).
+It covers dataset construction, the training task and architecture,
+evaluation, the anti-poisoning quarantine loop, promotion, and versioning.
+Companion docs: the farm's `DATABASE_DESIGN.md` (tables, export endpoint)
+and `TKP1.md` (pose wire format). In-flight implementation this design
+aligns with: PR #17 (deterministic stratified splitter), PR #18 (champion
+training script + CI smoke test), PR #19 (holdout evaluation), PR #20
+(champion/challenger promotion gate). Where this document proposes beyond
+what those PRs implement, it says so explicitly.
+
+## 1. Data contract: what training consumes
+
+- Only **confirmed** clips + labels. The farm has no draft/pending clip
+  lifecycle (master plan §1–§2), so everything reachable via
+  `GET /api/labels/export?since=` is training-eligible by construction.
+- Privacy posture: pose keypoints (TKP1) + labels only. Never video, never
+  personal data (master plan §1).
+- The export excludes quarantined sources (master plan §4) and presents
+  one **(source, clip, canonical trick name)** row per label — see §2.2.
+
+## 2. Dataset construction
+
+### 2.1 Export and watermarking
+
+- The nightly job pulls `GET /api/labels/export?since=<watermark>`,
+  receiving pose-blob R2 references, clip windows, raw label strings,
+  `user_id`, and the `taxonomy_version` in effect at label time.
+- The watermark is the last successful export timestamp, stored in the
+  training workspace (not in the farm). Per master plan §6, the nightly
+  run only proceeds when new labels since the watermark exceed 50.
+
+### 2.2 Canonicalization (raw → canonical)
+
+Applied **at dataset build time**, pinned to a single `taxonomy_version`
+for the whole training run. The farm preserves raw free-text strings
+forever; training consumes canonical names via `label_taxonomy`.
+
+Deterministic pipeline per label string:
+
+1. Normalize: lowercase, trim, collapse internal whitespace.
+2. Split combo strings on `-`, `/`, `+`, `,`, and strip parentheticals
+   like `(combo)` — e.g. `"hook - scoot - gainer - cartfull (combo)"`
+   becomes `[hook, scoot, gainer, cartfull]` on one window.
+3. Look up each token in `label_taxonomy` at the pinned
+   `taxonomy_version` → canonical name.
+4. **Judgment call:** tokens with no mapping keep their normalized form
+   as the canonical name and are appended to a curation queue
+   (`unmapped_labels.log`) for later taxonomy work. Rationale: failing
+   closed on unmapped names would starve early training when the
+   vocabulary is still growing; the log feeds the taxonomy curation loop
+   (master plan §9, open question 1).
+
+Clip → Label shape: the master plan's farm schema stores one label set
+per clip (`labels TEXT[]`, `clip_id` UNIQUE) while the program direction
+is one-to-many Clip → Label. The training view is agnostic: the dataset
+builder expands whatever the export returns into one
+`(clip_id, canonical_name)` pair per row. The farm's `DATABASE_DESIGN.md`
+owns the final schema choice; training works with either.
+
+### 2.3 Training targets
+
+- One **segment** per confirmed clip window: `(start_frame, end_frame)`
+  in source-frame coordinates (absolute indices into the source's
+  canonical 10 Hz pose sequence).
+- Multi-label: a combo clip with N canonical names becomes one segment
+  with an N-hot target vector over the canonical vocabulary (vocabulary
+  size fixed at the pinned `taxonomy_version`).
+- `is_combo` is derived (`len(trick_names) > 1`); the combo MVP does not
+  sub-segment individual tricks (master plan §6).
+
+### 2.4 Gap handling
+
+- TKP1 gap frames (all-zero confidence) are **missing data**. They break
+  interpolation and are never synthesized across (master plan §3).
+- Input features per frame: 17×3 `(x, y, confidence)` **plus one binary
+  gap-indicator channel** = 52 dims per frame. The indicator lets the
+  model distinguish "athlete at origin" from "no observation".
+- Loss masking: any frame-level auxiliary loss ignores gap frames.
+  Segment-level targets are unaffected — a labeled window may contain
+  gaps; the label still applies to the window.
+- Sequences are consumed at full source length in the dataset. Windowing,
+  if needed for memory, is an architecture/training detail, not a
+  dataset one.
+
+### 2.5 Background negatives
+
+- Non-labeled regions of contributed sources serve as background
+  negatives (master plan §6).
+- **Judgment call:** exclude a ±2 s margin around every labeled window
+  from the background pool. Boundaries are where labelers disagree, and
+  training on them as hard negatives injects label noise. The margin
+  width is a config constant to be tuned empirically.
+
+### 2.6 Splits (aligns with PR #17)
+
+- Stratified by `user_id`, target 80/10/10 train/val/holdout. No user's
+  clips leak across splits; all sources of one user land in one split.
+- Deterministic: seeded RNG, sorted ids, byte-identical `split.json`
+  (PR #17's `split_dataset.py` is the implementation).
+- Admin-curated holdout pinning: a pinned sample id pulls its whole user
+  into holdout — the poisoning-defense anchor. The holdout set stays
+  admin-curated (master plan §6).
+- The holdout split is **never loaded for training** — enforced at load
+  time by the training script (PR #18), not by convention.
+- Bootstrap guard (master plan §6): until the contributor pool exceeds
+  ~20 users (or any split would hold fewer than 50 clips), fall back to
+  unstratified random splits — user-stratification on a handful of
+  contributors yields degenerate splits.
+- The dataset manifest (sample ids, split assignment, taxonomy_version,
+  export watermark, split seed) is written next to the dataset; a
+  training run is reproducible from the manifest alone.
+
+## 3. Task definition
+
+- **Input:** pose key sequence, `T × 52`, canonical 10 Hz TKP1 (features
+  per §2.4).
+- **Output:** trick segments in **source-frame coordinates** — absolute
+  frame indices into the source's canonical 10 Hz sequence — each with
+  `trick_names: [...]` (canonical names) and derived `is_combo`.
+- This is detection + naming, not pose estimation. Pose quality is gated
+  separately by the existing `PoseAccuracy` harness and CI baseline
+  (master plan §6, "What stays"); fine-tuning MoveNet is off the table.
+
+## 4. Architecture
+
+### 4.1 In-flight baseline (PR #18)
+
+The current training script implements a **windowed softmax-linear
+classifier** over per-joint mean position + mean speed, with an
+`init_checkpoint` path that continues from the champion (the fine-tune
+path). The CI smoke test trains it on a synthetic fixture. This is the
+MVP that proves the pipeline end-to-end; it is not the production
+architecture.
+
+### 4.2 Proposed production architecture
+
+- **Temporal encoder** over the keypoint sequence (52-dim with gap
+  channel): a **dilated temporal convolutional network (TCN)** is the
+  first choice — small footprint, strong local temporal structure, and
+  straightforward Core ML conversion. A small Transformer encoder is the
+  fallback if long-range context proves decisive; it costs more
+  parameters and latency.
+- **Segment proposal head:** anchor-free per-frame boundary regression
+  (predict start/end offsets per frame) or per-frame BIO tagging with
+  boundary refinement. Either emits candidate segments with scores.
+- **Per-segment classification head:** multi-label classifier over the
+  canonical vocabulary — sigmoid per class, not softmax, because combos
+  carry multiple names.
+- **Rationale:** tricks are temporal patterns in joint trajectories;
+  frame-wise classifiers (the §4.1 baseline) cannot model duration or
+  boundaries. The encoder → proposal → classification split mirrors the
+  output contract directly (segments + names).
+- **On-device constraint (proposal — unmeasured):** the published model
+  must run on-device via Core ML. Budget: ≤ 2 M parameters and < 100 ms
+  inference for a 60 s (600-frame) sequence on a recent iPhone.
+  Architecture choices that break the budget don't ship, regardless of
+  validation score.
+
+### 4.3 Post-training conversion
+
+`coremltools` → Core ML (`.mlmodelc`), uploaded to R2; `POST
+/api/models` publishes the champion with its manifest (see
+`MODEL_CONTRACT.md`). Conversion is a pipeline step, not a manual
+action.
+
+## 5. Training loop
+
+Nightly pipeline order:
+
+1. Export new labels since the watermark (`GET /api/labels/export`).
+2. Build the dataset (§2): canonicalize at the pinned
+   `taxonomy_version`, expand to (clip, name) pairs, attach gap-masked
+   TKP1 sequences, sample background negatives.
+3. Split deterministically by `user_id` (PR #17).
+4. Train the challenger on the train split, initializing from the
+   current champion (`init_checkpoint` — the standing fine-tune path;
+   from-scratch training is the exception: architecture change or
+   taxonomy major bump, decided by the maintainer). Val split for model
+   selection; holdout never loaded.
+5. Fixture regression gate (§6.3) — challenger vs champion on fixtures.
+6. Holdout evaluation (§6.2) — report written next to the artifact.
+7. Promotion gate (§8) — champion/challenger on the validation metric.
+8. Publish (§9, `MODEL_CONTRACT.md`).
+
+Further loop properties:
+
+- **Cadence:** nightly cron or manual dispatch; skipped when new labels
+  since the watermark are ≤ 50 (master plan §6).
+- **Determinism:** seeded RNG everywhere, sorted iteration order, no
+  timestamps in artifacts — re-runs yield byte-identical `metrics.json`
+  (established by PR #18; required of all future training code).
+- **Config:** hermetic TOML; unknown/missing keys fail closed (PR #18).
+- **Compute:** `compute = "cpu"|"gpu"` remains the single GPU-worker
+  seam (PR #18); the nightly job targets the GPU worker when available.
+- **Fixture scores** are recorded in the model registry alongside val
+  metrics, so the nightly job compares against the champion's fixture
+  scores without re-running the champion.
+
+## 6. Evaluation
+
+### 6.1 Metrics (aligns with PR #19)
+
+`Training/evaluate.py` scores a predictions file against the holdout
+split and writes a deterministic `holdout_report.json` next to the
+artifact:
+
+- **Detection rate** — temporal IoU ≥ 0.5, name-agnostic (did we find
+  the trick?).
+- **Segment precision / recall / F1** — name match required (did we
+  find it *and* name it?).
+- **Name accuracy given detection** — of the detected segments, how many
+  names are right.
+- **Per-name precision/recall** — exposes weak vocabulary entries and
+  guides taxonomy curation.
+- **Background false-positive count** — spurious segments fired in
+  unlabeled regions.
+
+Additionally recommended for the champion/challenger comparison:
+**mAP at tIoU ∈ {0.3, 0.5, 0.7}** as the segment-quality summary. The
+evaluator (PR #19) computes the core set above; mAP is the proposed
+promotion-facing roll-up.
+
+Deliberately **not** PCK: PCK is a pose-estimation metric. Pose
+estimation is MoveNet's job and is gated separately by the
+`PoseAccuracy` CI baseline (per the PR #19 discussion).
+
+### 6.2 Holdout protocol
+
+- The holdout split is admin-curated and pinned (PR #17). The evaluator
+  rejects predictions for non-holdout or unknown samples — fail closed,
+  never silently evaluated (PR #19).
+- The evaluator is decoupled from training: it scores predictions
+  files, so it works with any architecture emitting the output contract,
+  including the §4.2 proposal, without duplicating model math.
+- The holdout report is written next to the model artifact, uploaded to
+  R2, and referenced from the model manifest (`holdout_report_r2_key`).
+  It is recorded for every nightly candidate; the promotion decision
+  itself is the validation-metric gate (§8).
+
+### 6.3 Fixture regression gate (anti-poisoning)
+
+- **Fixtures:** the existing pose-accuracy fixtures (guarding the
+  *input* to the trick model) **plus** a trick-labeled fixture set —
+  fixed (pose sequence, labeled segments) pairs covering the core
+  vocabulary and known combos. Fixtures are versioned with the repo;
+  adding a fixture is a code change, never data-dependent.
+- **Gate:** after training a candidate, run it over the fixtures and
+  compare segment IoU + name accuracy against the champion's recorded
+  fixture scores.
+- **Regression policy (judgment call):** regression iff
+  `challenger_fixture_score < champion_fixture_score − 0.01` (absolute,
+  on the composite fixture score). Any regression beyond that tolerance
+  triggers the quarantine flow (§7) and skips promotion. No human
+  override exists in the nightly path; the maintainer can re-run with
+  an explicit override flag, which is logged.
+
+## 7. Quarantine mechanics (anti-poisoning)
+
+On fixture regression (master plan §6), in order:
+
+1. **Discord alert** via webhook with: the metrics delta (challenger vs
+   champion fixture scores), the affected `source_id`s ingested that
+   day, and the responsible `user_id`s (attribution from
+   `sources.user_id` — the "basic level of identification" for bad
+   data).
+2. **Quarantine that day's ingested sources:** one `data_quarantine`
+   row per source ingested since the last watermark —
+   `(source_id, user_id, reason, metrics JSONB snapshot,
+   quarantined_at)`. "That day's ingested data" means sources with
+   `created_at` after the previous successful watermark.
+3. **Training exclusion:** the export excludes sources with an
+   unresolved quarantine row (`resolution IS NULL`) or
+   `resolution='purged'`; `resolution='released'` rows are re-included.
+4. **Skip promotion** for that night's candidate, regardless of its
+   validation metrics.
+5. **Review workflow:** the maintainer reviews the quarantine queue and
+   marks each row **released** (good data — re-included next night) or
+   **purged** (bad data — excluded permanently). Repeated purges
+   against one user feed the `users.is_blocked` / reputation decision,
+   which remains a manual call.
+6. The next nightly run retries with the quarantine applied. The loop
+   cannot promote poisoned data even when validation metrics look fine,
+   because the fixture gate (§6.3) runs **before** the promotion gate.
+
+## 8. Promotion (aligns with PR #20)
+
+- **Champion/challenger:** `Training/promote.py` compares the
+  challenger's `metrics.json` against the champion's. Promote iff the
+  challenger beats the champion by **≥ 1% relative** improvement on the
+  configured validation metric —
+  `(challenger − champion) / champion ≥ 0.01` (PR #20).
+- **Judgment call:** for the production architecture (§4.2), the
+  promotion metric should be the segment-quality composite (segment F1
+  / mAP), not raw window accuracy — `val_accuracy` (PR #20's default)
+  is the right default for the §4.1 windowed baseline only. The gate's
+  `--metric` flag already supports this; the nightly config chooses
+  the metric appropriate to the active architecture.
+- Exit codes: 0 = promote, 3 = archive, 2 = input error (fail closed).
+  Each decision is appended to the model registry (local
+  `Training/registry.json`; the farm's `models` table once
+  `POST /api/models` exists).
+- **Gate order:** fixture regression (§6.3) → holdout evaluation
+  (§6.2, recorded) → promotion gate. A candidate that regresses on
+  fixtures never reaches champion/challenger comparison.
+- **Rollback:** the registry and the farm `models` table retain every
+  promoted champion. Rollback is re-pointing the `current` manifest at
+  the previous champion's artifact — no retraining required.
+
+## 9. Versioning
+
+- **Model version:** `trick-v<major>.<minor>` (judgment call).
+  Minor = retrain on new data, same architecture and taxonomy major.
+  Major = architecture change, or a taxonomy change that alters the
+  output space (canonical renames/removals).
+- **Taxonomy coupling:** every model records the `taxonomy_version` it
+  trained on (in `models.taxonomy_version` and the manifest). A
+  taxonomy change that renames or removes canonical names forces a
+  model major bump — otherwise the model's name outputs would disagree
+  with the current vocabulary. Additive vocabulary growth (new names
+  only) is a minor bump.
+- `taxonomy_version` itself is a monotonic int, bumped when canonical
+  names are added or changed (master plan §2).
+
+## 10. Open questions
+
+1. Unmapped raw labels (§2.2) — keep-training-with-logging vs
+   fail-closed exclusion.
+2. Background margin width (§2.5) — ±2 s is a starting guess; tune
+   against validation.
+3. Fixture regression tolerance (§6.3) — 0.01 absolute is a starting
+   point.
+4. On-device budget (§4.2) — ≤ 2 M params / < 100 ms needs on-device
+   measurement before it can gate anything.
+5. Promotion metric for the production architecture (§8) — segment
+   composite vs window accuracy.
