@@ -36,7 +36,6 @@ import argparse
 import copy
 import hashlib
 import json
-import random
 import shutil
 import sys
 import types
@@ -421,9 +420,8 @@ def load_checkpoint(path: Path) -> dict[str, Any]:
 def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
     cfg = load_config(config_path)
     xp = _select_backend(cfg["compute"])
-    # Deterministic RNGs: the seed is part of the artifact.
-    random.seed(cfg["seed"])
-
+    # Deterministic RNGs: the seed is part of the artifact. All randomness
+    # flows through np.random.default_rng(seed) below (no stdlib `random`).
     repo_root = Path(__file__).resolve().parent.parent
 
     def resolve(p: str) -> Path:

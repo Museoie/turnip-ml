@@ -19,6 +19,7 @@ venv/
 # Data
 data/
 datasets/
+runs/
 
 # Jupyter
 .ipynb_checkpoints/
