@@ -156,9 +156,13 @@ def run(champion_path: Path, challenger_path: Path, metric: str,
     registry = load_registry(registry_path)
     registry.append(record)
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(registry_path, "w", encoding="utf-8") as fh:
+    # Atomic write: a crash mid-write must not leave a malformed registry
+    # behind (the next run fail-closes on it and the audit history is lost).
+    tmp = registry_path.with_suffix(registry_path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(registry, fh, indent=2, sort_keys=True)
         fh.write("\n")
+    tmp.replace(registry_path)
 
     return record, EXIT_PROMOTE if decision == "promote" else EXIT_ARCHIVE
 

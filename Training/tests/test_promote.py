@@ -23,10 +23,12 @@ class DecideTest(unittest.TestCase):
         self.assertAlmostEqual(improvement, 0.025)
 
     def test_promote_exact_boundary(self):
-        # improvement == threshold promotes (>=).
-        decision, improvement, _ = decide(1.0, 1.01, 0.01, "val_accuracy")
+        # improvement == threshold promotes (>=). 4.0 -> 5.0 is exactly
+        # 0.25 relative, and 0.25 is exactly representable in binary
+        # floating point, so a strict-> mutant (>) flips this test red.
+        decision, improvement, _ = decide(4.0, 5.0, 0.25, "val_accuracy")
         self.assertEqual(decision, "promote")
-        self.assertGreaterEqual(improvement, 0.01)
+        self.assertEqual(improvement, 0.25)
 
     def test_archive_below_threshold(self):
         # 0.80 -> 0.805 is +0.625% relative: real gain, not enough.
@@ -117,6 +119,16 @@ class RunTest(unittest.TestCase):
         entries = json.loads(self.registry.read_text(encoding="utf-8"))
         self.assertEqual([e["decision"] for e in entries],
                          ["promote", "archive"])
+
+    def test_registry_write_is_atomic(self):
+        # run() must not leave the tmp file behind: the registry is
+        # written to registry.json.tmp then atomically replaced.
+        champion = self.write_metrics("champion.json", val_accuracy=0.80)
+        c1 = self.write_metrics("c1.json", val_accuracy=0.82)
+        promote.run(champion, c1, "val_accuracy", 0.01, self.registry)
+        self.assertFalse((self.root / "registry.json.tmp").exists())
+        entries = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(len(entries), 1)
 
     def test_custom_metric_key(self):
         champion = self.write_metrics("champion.json", val_f1=0.70)
