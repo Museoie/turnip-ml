@@ -22,6 +22,8 @@ deterministic 0–100 score must stay within `POSE_TOLERANCE` (0.5 pts) of
 | `requirements.txt` | Pinned Python deps (determinism: dep drift must not move the score) |
 | `ci/fetch_fixture.py` | Downloads fixture clips from `POSE_FIXTURE_URLS` (or R2), verifies sha256 |
 | `ci/check_gate.py` | Compares a score against the baseline, enforces the tolerance |
+| `.github/workflows/python-checks.yml` | CI: `ruff check`, `ruff format --check`, `mypy PoseAccuracy` on PRs touching `*.py` |
+| `pyproject.toml` | Shared ruff/mypy config (target py3.12, `ignore_missing_imports`) |
 
 ## Running locally
 
@@ -50,6 +52,22 @@ python PoseAccuracy/ci/check_gate.py \
 
 `movenet_infer.py` verifies the downloaded model against the expected
 sha256/size and refuses to run on a mismatch.
+
+## Code quality
+
+PRs touching Python files get lint, format, and type checks from the
+`Python checks` workflow: `ruff check`, `ruff format --check`, and `mypy`
+on the `PoseAccuracy` package. Tool versions are pinned
+(`ruff==0.16.7`, `mypy==2.3.1`), matching the repo's pinned-dependency
+convention. Run the same checks locally:
+
+```bash
+pip install "ruff==0.16.7" "mypy==2.3.1"
+ruff check . && ruff format --check . && mypy PoseAccuracy
+```
+
+The scripts carry `#!/usr/bin/env python3` shebangs and are committed with
+the executable bit set; `ruff check` enforces that (`EXE001`).
 
 ## The metric
 

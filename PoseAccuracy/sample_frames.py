@@ -6,19 +6,24 @@ box: given a video, returns (results, metadata) where results is a list of
 sample indices. Both reference-label generation and
 MoveNet candidate extraction MUST use this function so frames stay aligned.
 """
+
 from __future__ import annotations
+
 import cv2
 
 TARGET_FPS = 10.0
 
-def sample_plan(n_frames: int, src_fps: float, target_fps: float = TARGET_FPS) -> list[tuple[int, float]]:
+
+def sample_plan(
+    n_frames: int, src_fps: float, target_fps: float = TARGET_FPS
+) -> list[tuple[int, float]]:
     """Return [(frame_index, timestamp_sec)] — deterministic, no randomness."""
     if src_fps <= 0 or n_frames <= 0:
         return []
     step = src_fps / target_fps
     plan, i = [], 0
     while True:
-        idx = int(round(i * step))
+        idx = round(i * step)
         if idx >= n_frames:
             break
         plan.append((idx, idx / src_fps))
@@ -30,6 +35,7 @@ def sample_plan(n_frames: int, src_fps: float, target_fps: float = TARGET_FPS) -
             seen.add(idx)
             out.append((idx, ts))
     return out
+
 
 def iter_samples(video_path: str, target_fps: float = TARGET_FPS):
     cap = cv2.VideoCapture(video_path)

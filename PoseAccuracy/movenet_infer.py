@@ -31,7 +31,9 @@ sorted keys. Frames are sample_frames.sample_plan() indices minus any
 indices listed in --drop-frames, so they align frame-for-frame with the
 reference labels.
 """
+
 from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -45,15 +47,19 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from sample_frames import sample_plan  # noqa: E402
+from sample_frames import sample_plan
 
-DEFAULT_MODEL_URL = ("https://tfhub.dev/google/lite-model/movenet/singlepose/"
-                     "thunder/tflite/int8/4?lite-format=tflite")
+DEFAULT_MODEL_URL = (
+    "https://tfhub.dev/google/lite-model/movenet/singlepose/"
+    "thunder/tflite/int8/4?lite-format=tflite"
+)
 # Identity recorded in Turnip/Models/README.md @ 6adc2953 (Kaggle artifact).
 EXPECTED_SHA256 = "b72fed22707cd6fb94b5a248b9bddb9c062b9f445471b4fa263407cf6d222011"
 EXPECTED_SIZE = 7126768
-MODEL_ID = ("movenet-thunder-int8/kaggle-singlepose-thunder-tflite-int8-1/"
-            "sha256:b72fed22707cd6fb94b5a248b9bddb9c062b9f445471b4fa263407cf6d222011")
+MODEL_ID = (
+    "movenet-thunder-int8/kaggle-singlepose-thunder-tflite-int8-1/"
+    "sha256:b72fed22707cd6fb94b5a248b9bddb9c062b9f445471b4fa263407cf6d222011"
+)
 
 IN_SIZE = 256
 
@@ -66,7 +72,7 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def obtain_model(model_path: str | None, model_url: str) -> str:
+def obtain_model(model_path: str | None, model_url: str | None) -> str:
     if model_path:
         path = model_path
     else:
@@ -74,16 +80,18 @@ def obtain_model(model_path: str | None, model_url: str) -> str:
         path = os.path.join(tempfile.gettempdir(), "movenet_thunder_int8.tflite")
         if not os.path.exists(path):
             print(f"downloading model from {url} ...")
-            req = urllib.request.Request(url, headers={"User-Agent": "turnip-pose-harness/1.0"})
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "turnip-pose-harness/1.0"}
+            )
             with urllib.request.urlopen(req, timeout=300) as r, open(path, "wb") as f:
-                for chunk in iter(lambda: r.read(1 << 20), b""):
-                    f.write(chunk)
+                f.writelines(iter(lambda: r.read(1 << 20), b""))
     got_size = os.path.getsize(path)
     got_sha = sha256_file(path)
     if got_sha != EXPECTED_SHA256 or got_size != EXPECTED_SIZE:
         raise SystemExit(
             f"model identity mismatch: expected sha256 {EXPECTED_SHA256[:16]}... "
-            f"size {EXPECTED_SIZE}, got {got_sha[:16]}... size {got_size}. Refusing to run.")
+            f"size {EXPECTED_SIZE}, got {got_sha[:16]}... size {got_size}. Refusing to run."
+        )
     print(f"model ok: sha256={got_sha[:16]}... size={got_size}")
     return path
 
@@ -92,19 +100,20 @@ def letterbox(frame_bgr: np.ndarray):
     """Replicate FramePreprocessor: returns (input_rgb_uint8, offsetX, offsetY, scale)."""
     h, w = frame_bgr.shape[:2]
     scale = min(IN_SIZE / w, IN_SIZE / h)
-    new_w = int(round(w * scale))
-    new_h = int(round(h * scale))
+    new_w = round(w * scale)
+    new_h = round(h * scale)
     resized = cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     canvas = np.zeros((IN_SIZE, IN_SIZE, 3), dtype=np.uint8)
     offset_x = (IN_SIZE - new_w) // 2
     offset_y = (IN_SIZE - new_h) // 2
-    canvas[offset_y:offset_y + new_h, offset_x:offset_x + new_w] = rgb
+    canvas[offset_y : offset_y + new_h, offset_x : offset_x + new_w] = rgb
     return canvas, offset_x, offset_y, scale
 
 
 def make_interpreter(model_path: str):
     from ai_edge_litert.interpreter import Interpreter
+
     it = Interpreter(model_path=model_path)
     it.allocate_tensors()
     inp = it.get_input_details()[0]
@@ -126,22 +135,29 @@ def to_frame_normalized(kpts_17x3, offset_x, offset_y, scale, w, h):
         y, x, score = (float(v) for v in kpts_17x3[k])
         src_x = (x * IN_SIZE - offset_x) / scale / w
         src_y = (y * IN_SIZE - offset_y) / scale / h
-        joints.append({"x": round(src_x, 4), "y": round(src_y, 4),
-                       "c": round(score, 4)})
+        joints.append(
+            {"x": round(src_x, 4), "y": round(src_y, 4), "c": round(score, 4)}
+        )
     return joints
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True)
-    ap.add_argument("--frames-dir", required=True,
-                    help="dir containing the fixture mp4s (named per manifest)")
+    ap.add_argument(
+        "--frames-dir",
+        required=True,
+        help="dir containing the fixture mp4s (named per manifest)",
+    )
     ap.add_argument("--model-path", default=None)
     ap.add_argument("--model-url", default=None)
-    ap.add_argument("--drop-frames", default=None,
-                    help="dropped_frames.json: sampled indices with no reference "
-                         "label are skipped so the candidate aligns frame-for-frame "
-                         "with the reference")
+    ap.add_argument(
+        "--drop-frames",
+        default=None,
+        help="dropped_frames.json: sampled indices with no reference "
+        "label are skipped so the candidate aligns frame-for-frame "
+        "with the reference",
+    )
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -185,7 +201,9 @@ def main():
         frames.sort(key=lambda r: r["frame_index"])
         expected = len(plan) - len(skip)
         if len(frames) != expected:
-            raise SystemExit(f"{cid}: sampled {len(frames)} frames, expected {expected}")
+            raise SystemExit(
+                f"{cid}: sampled {len(frames)} frames, expected {expected}"
+            )
         clips_out[cid] = {"frames": frames}
         print(f"{cid}: {len(frames)} frames scored")
 

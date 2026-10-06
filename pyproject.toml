@@ -1,0 +1,13 @@
+# Shared config for the Python tooling (ruff + mypy) used by
+# .github/workflows/python-checks.yml. Run the same checks locally with:
+#   pip install "ruff==0.16.7" "mypy==2.3.1"
+#   ruff check . && ruff format --check . && mypy PoseAccuracy
+[tool.ruff]
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+# The harness imports binary/optional deps (cv2, mediapipe, ai_edge_litert)
+# that don't always ship type stubs in every environment; check the
+# harness's own code, not its dependencies.
+ignore_missing_imports = true
