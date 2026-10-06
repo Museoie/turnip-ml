@@ -39,9 +39,9 @@ This file is the pointer doc; the READMEs above are the source of truth.
    the baseline. Baseline changes get explicit maintainer review, and a
    merged baseline change lands with its rebuild QA notes.
 
-3. **Trick labels come from Hoie — never inferred from footage.** Do not
+3. **Trick labels come from the maintainer — never inferred from footage.** Do not
    guess what trick a clip shows; the labels in
-   `PoseAccuracy/fixture-manifest.json` are his words.
+   `PoseAccuracy/fixture-manifest.json` are the maintainer's words.
 
 4. **Large artifacts are never committed.** No model binaries, datasets,
    or videos in git. Fixture videos are fetched from the public R2 URLs
