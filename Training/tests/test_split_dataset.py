@@ -30,7 +30,7 @@ def make_manifest(n_users=40, seed=1234, min_clips=1, max_clips=12):
 
 class SplitContractTest(unittest.TestCase):
     def test_no_user_leaks_across_splits(self):
-        """turnip-ml#12 acceptance: no user_id appears in two splits."""
+        """Acceptance: no user_id appears in two splits."""
         mapping = split_records(make_manifest(), seed=7)
         seen: dict[str, str] = {}
         for rec in make_manifest():
@@ -42,7 +42,7 @@ class SplitContractTest(unittest.TestCase):
             seen[uid] = split
 
     def test_byte_identical_across_runs(self):
-        """turnip-ml#12 acceptance: same manifest + seed = byte-identical."""
+        """Acceptance: same manifest + seed = byte-identical."""
         manifest = make_manifest()
         first = dump_split(split_records(manifest, seed=42))
         for _ in range(3):
