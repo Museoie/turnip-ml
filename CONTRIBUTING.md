@@ -82,7 +82,9 @@ Closes hoiekim/turnip-ml#<N>
 
 ## CI on your PR
 
-- The pose-accuracy gate runs the harness over the three fixture clips
+- The pose-accuracy gate runs only when the PR touches `PoseAccuracy/**`
+  or the workflow itself; docs-only PRs skip it entirely.
+- When it runs, the gate scores the harness over the three fixture clips
   and fails on any score more than 0.5 points below `baseline.json`.
   If the regression is accepted (deliberate model change), a maintainer
   adds the `pose-accuracy-override` label and re-runs — the label only
