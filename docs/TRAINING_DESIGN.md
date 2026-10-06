@@ -54,12 +54,12 @@ Deterministic pipeline per label string:
    vocabulary is still growing; the log feeds the taxonomy curation loop
    (master plan §9, open question 1).
 
-Clip → Label shape: the master plan's farm schema stores one label set
-per clip (`labels TEXT[]`, `clip_id` UNIQUE) while the program direction
-is one-to-many Clip → Label. The training view is agnostic: the dataset
-builder expands whatever the export returns into one
-`(clip_id, canonical_name)` pair per row. The farm's `DATABASE_DESIGN.md`
-owns the final schema choice; training works with either.
+Clip → Label shape (decided): the farm stores **one label row per
+`(clip_id, trick_name)`** (`DATABASE_DESIGN.md` §1.1) — one-to-many at
+every level (Source → Clip → Label). The export is already
+label-granular (§1), so the dataset builder consumes one
+`(clip_id, raw trick name)` row per export row and canonicalizes each
+through `label_taxonomy` at the pinned `taxonomy_version` (above).
 
 ### 2.3 Training targets
 
@@ -307,8 +307,14 @@ On fixture regression (master plan §6), in order:
   (§6.2, recorded) → promotion gate. A candidate that regresses on
   fixtures never reaches champion/challenger comparison.
 - **Rollback:** the registry and the farm `models` table retain every
-  promoted champion. Rollback is re-pointing the `current` manifest at
-  the previous champion's artifact — no retraining required.
+  promoted champion. Rollback publishes a new `models` row that
+  re-promotes the previous champion's artifacts — a new unique
+  `version` (`trick-v<major>.<minor>-rb<N>`, e.g. `trick-v1.3-rb1`;
+  versions are never re-published, so the rollback needs its own) with
+  `promoted_at = now()`. The manifest follows because "current" is the
+  row with the greatest non-null `promoted_at` (DATABASE_DESIGN.md §4).
+  No retraining, no re-point endpoint — see MODEL_CONTRACT.md §5 for
+  the full procedure.
 
 ## 9. Versioning
 

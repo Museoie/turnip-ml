@@ -12,44 +12,62 @@ and the OTA flow of §5.4. Companion docs: the farm's
 
 ## 1. Manifest format
 
-Served by `GET /api/models/current` and stored on the farm's `models`
-row. Exact fields:
+Served by `GET /api/models/current`, assembled from the farm's
+`models` row (plus `label_taxonomy` for the vocabulary). The JSON keys
+match the farm column names exactly, so an implementer reading
+`DATABASE_DESIGN.md` finds every field:
 
 ```jsonc
 {
-  "version": "trick-v1.3",      // trick-v<major>.<minor> (TRAINING_DESIGN.md §9)
-  "model_type": "trick-detection",
-  "taxonomy_version": 7,              // monotonic int; the vocab this model trained on
+  "version": "trick-v1.3",            // models.version (trick-v<major>.<minor>)
+  "model_type": "trick-detection",    // models.model_type
+  "taxonomy_version": 7,              // models.taxonomy_version
   "r2_key": "models/trick-v1.3.mlmodelc.zip",
-  "sha256": "<hex of the zip bytes>",
-  "byte_size": 1843200,
-  "input": {
+                                      // models.r2_key
+  "sha256": "<hex of the zip bytes>", // models.sha256 (NOT NULL)
+  "byte_size": 1843200,               // models.byte_size
+  "min_client_version": "0.2.0",      // models.min_client_version
+  "input_desc": {                     // models.input_desc (JSONB)
     "format": "TKP1",
     "format_version": 1,
     "sample_rate_hz": 10.0,           // canonical input rate the model expects
     "keypoint_count": 17,
     "features": ["x", "y", "confidence", "gap_indicator"]
   },
-  "output": {
+  "output_desc": {                    // models.output_desc (JSONB)
     "coordinates": "source-frame",    // absolute indices into the canonical 10 Hz sequence
     "fields": ["start_frame", "end_frame", "score", "trick_names", "is_combo"]
   },
-  "vocabulary": [                     // full canonical vocab at taxonomy_version
+  "vocabulary": [                     // assembled from label_taxonomy
     {"canonical": "cork", "aliases": ["cork 720", "corkscrew"]},
     {"canonical": "gainer", "aliases": ["moon kick"]},
     "..."
   ],
-  "val_metrics": {
+  "val_metrics": {                    // models.val_metrics (JSONB)
     "segment_f1": 0.81,
     "detection_rate_iou05": 0.88,
     "name_accuracy_given_detection": 0.93
   },
   "holdout_report_r2_key": "models/trick-v1.3.holdout_report.json",
-  "min_client_version": "0.2.0",      // clients below this skip the update
-  "promoted_at": "2026-10-07T07:12:00Z",
-  "training_run_id": "nightly-2026-10-07"
+                                      // models.holdout_report_r2_key
+  "training_run_id": "nightly-2026-10-07",
+                                      // models.training_run_id
+  "promoted_at": "2026-10-07T07:12:00Z"
+                                      // models.promoted_at (RFC 3339 UTC)
 }
 ```
+
+Field provenance — every manifest key has a farm-side source; there
+are no phantom fields:
+
+- `version`, `model_type`, `taxonomy_version`, `r2_key`, `sha256`,
+  `byte_size`, `min_client_version`, `input_desc`, `output_desc`,
+  `val_metrics`, `holdout_report_r2_key`, `training_run_id`,
+  `promoted_at` — the `models` row, one key per column, same name.
+  `models.id` (row UUID) is internal and not exposed in the manifest.
+- `vocabulary` — the full canonical vocabulary at the row's
+  `taxonomy_version`, assembled server-side from `label_taxonomy`
+  (`canonical` names + `aliases`), not stored on the `models` row.
 
 Notes:
 
@@ -61,6 +79,8 @@ Notes:
   (§3.3).
 - `promoted_at` is RFC 3339 UTC. All sizes are bytes; the checksum is
   over the exact zip bytes the client downloads.
+- `min_client_version` NULL means the update applies to all client
+  versions.
 
 ## 2. Publishing flow
 
@@ -69,10 +89,17 @@ Notes:
    `sha256` + `byte_size` over the zip.
 3. Upload the artifact and the holdout report to R2
    (`models/trick-v<...>.mlmodelc.zip`).
-4. `POST /api/models` (admin-scoped): creates the `models` row
-   (version, `model_type`, `taxonomy_version`, `r2_key`, `val_metrics`
-   JSONB, `promoted_at`) and flips `current` to the new row. Old rows
-   are retained for rollback.
+4. `POST /api/models` (service-key scoped): inserts the `models`
+   row — `version`, `model_type`, `taxonomy_version`, `r2_key`,
+   `sha256` (NOT NULL, 64-char hex of the artifact bytes), `byte_size`,
+   `min_client_version`, `input_desc`, `output_desc`,
+   `val_metrics` JSONB, `holdout_report_r2_key`, `training_run_id`,
+   and `promoted_at = now()`. The current model is defined as the row
+   with the greatest non-null `promoted_at` (DATABASE_DESIGN.md §4),
+   so promotion IS the insert — there is no `current` flag to flip.
+   Versions are immutable: an existing `version` → `409
+   VERSION_EXISTS` (bump the version instead). Old rows are retained
+   for rollback.
 5. `GET /api/models/current` serves the manifest above: version, URL,
    checksum, `taxonomy_version`, and the vocabulary list.
 
@@ -187,10 +214,19 @@ space from there.
 - **`min_client_version`:** clients below it skip the update silently
   (logged locally). Breaking input-format changes bump
   `min_client_version` and the model major version together.
-- **Rollback (server side):** re-pointing `GET /api/models/current` at
-  the previous champion's row; clients pick it up on the next poll via
-  the normal version-compare path. No client-side rollback protocol is
-  needed beyond the atomic-swap failure fallback (§4).
+- **Rollback (server side):** publish a new `models` row that
+  re-promotes the previous champion — `r2_key`, `sha256`, `byte_size`,
+  `input_desc`, `output_desc`, `taxonomy_version`, `val_metrics`,
+  `holdout_report_r2_key`, and `training_run_id` copied from the
+  previous champion's row; a new unique `version`
+  (`trick-v<major>.<minor>-rb<N>`, e.g. `trick-v1.3-rb1` — versions are
+  never re-published, so the rollback needs its own); and
+  `promoted_at = now()`. Because "current" is the greatest non-null
+  `promoted_at`, the insert alone moves the manifest back to the old
+  artifacts — no retraining, no re-point endpoint. Clients pick the
+  rollback up on the next poll via the normal version-compare path. No
+  client-side rollback protocol is needed beyond the atomic-swap
+  failure fallback (§4).
 
 ## 6. Open questions
 
