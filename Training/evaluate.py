@@ -42,12 +42,13 @@ the ground-truth name set ("a+b" and ["a", "b"] are the same).
   every ground-truth segment (pure hallucinations).
 
 On PCK: "PCK" (percentage of correct keypoints) is a pose-estimation
-metric. Since the 2026-10-05 program direction, turnip-ml trains trick
+metric, and per the maintainer's 2026-10-06 ruling it is out of scope
+here. Since the 2026-10-05 program direction, turnip-ml trains trick
 *detection* (pose sequence -> trick segments + names); pose estimation
 itself is MoveNet's job and is gated separately by the pose-accuracy CI
 baseline (PoseAccuracy/baseline.json). There is no keypoint prediction to
-score PCK against, so this script evaluates segment detection and naming
-instead.
+score PCK against -- localization is covered by detection_rate -- so this
+script evaluates segment detection and naming instead.
 
 Split discipline (fail closed)
 ------------------------------
