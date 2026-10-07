@@ -6,8 +6,9 @@ what this repo validates; see the root README for repo-wide conventions.
 
 ## Layout
 
-- `split_dataset.py` — deterministic stratified train/val/holdout splitter
-  (turnip-ml#12). See its docstring for the full contract.
+- `split_dataset.py` — deterministic stratified train/val/holdout splitter.
+  See its docstring for the full contract. (Lands with the still-open
+  splitter PR, turnip-ml#17 — the splitter steps below need that PR until it merges.)
 - `train.py` — champion training / fine-tuning script (turnip-ml#13).
   Hermetic TOML config, deterministic, CI smoke-tested.
 - `make_smoke_fixture.py` — generates the tiny synthetic smoke fixture.

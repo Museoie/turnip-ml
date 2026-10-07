@@ -86,6 +86,13 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(m["val_accuracy"], 1.0)
         self.assertEqual(m["init_checkpoint"], str(ckpt))
         self.assertLessEqual(m["train_loss_final"], self._metrics()["train_loss_final"])
+        # Discrimination: the fine-tune run must *start* from the checkpoint,
+        # not silently retrain from scratch. `init_checkpoint` in the metrics
+        # only echoes the config, so a mutant that forces `init` to None in
+        # `run()` still passes every assertion above -- but its initial loss
+        # equals the from-scratch run's instead of the checkpoint's.
+        scratch = self._metrics()
+        self.assertLess(m["train_loss_initial"], scratch["train_loss_initial"])
 
     def _rewrite_config(self, old: str, new: str) -> Path:
         p = self.tmp / "t.toml"
