@@ -112,7 +112,7 @@ plan.
 
 ### 3.1 Input
 
-- The client feeds the model a canonical **10 Hz TKP1 frame sequence**:
+- The client feeds the model a canonical **10 Hz pose-format frame sequence**:
   `T × 17 × 3` float32 `(x, y, confidence)`, x/y normalized 0–1 in
   source-frame coordinates, gaps as all-zero-confidence frames.
 - If the client's analysis rate differs from 10 Hz, the client resamples

@@ -17,7 +17,7 @@ what those PRs implement, it says so explicitly.
 - Only **confirmed** clips + labels. The farm has no draft/pending clip
   lifecycle (master plan §1–§2), so everything reachable via
   `GET /api/labels/export?since=` is training-eligible by construction.
-- Privacy posture: pose keypoints (TKP1) + labels only. Never video, never
+- Privacy posture: pose keypoints (pose format) + labels only. Never video, never
   personal data (master plan §1).
 - The export excludes quarantined sources (master plan §4) and presents
   one **(source, clip, canonical trick name)** row per label — see §2.2.
@@ -74,7 +74,7 @@ through `label_taxonomy` at the pinned `taxonomy_version` (above).
 
 ### 2.4 Gap handling
 
-- TKP1 gap frames (all-zero confidence) are **missing data**. They break
+- pose-format gap frames (all-zero confidence) are **missing data**. They break
   interpolation and are never synthesized across (master plan §3).
 - Input features per frame: 17×3 `(x, y, confidence)` **plus one binary
   gap-indicator channel** = 52 dims per frame. The indicator lets the
@@ -116,7 +116,7 @@ through `label_taxonomy` at the pinned `taxonomy_version` (above).
 
 ## 3. Task definition
 
-- **Input:** pose key sequence, `T × 52`, canonical 10 Hz TKP1 (features
+- **Input:** pose key sequence, `T × 52`, canonical 10 Hz pose format (features
   per §2.4).
 - **Output:** trick segments in **source-frame coordinates** — absolute
   frame indices into the source's canonical 10 Hz sequence — each with
@@ -174,7 +174,7 @@ Nightly pipeline order:
 1. Export new labels since the watermark (`GET /api/labels/export`).
 2. Build the dataset (§2): canonicalize at the pinned
    `taxonomy_version`, expand to (clip, name) pairs, attach gap-masked
-   TKP1 sequences, sample background negatives.
+   pose-format sequences, sample background negatives.
 3. Split deterministically by `user_id` (PR #17).
 4. Train the challenger on the train split, initializing from the
    current champion (`init_checkpoint` — the standing fine-tune path;
