@@ -5,8 +5,8 @@ implementing §6 of the master plan
 (`https://github.com/hoiekim/turnip-farm/blob/main/docs/MASTER_PLAN.md`).
 It covers dataset construction, the training task and architecture,
 evaluation, the anti-poisoning quarantine loop, promotion, and versioning.
-Companion docs: the farm's `DATABASE_DESIGN.md` (tables, export endpoint)
-and `TKP1.md` (pose wire format). In-flight implementation this design
+Companion docs: the farm's `BACKEND_DESIGN.md` (tables, export endpoint)
+and `POSE_FORMAT.md` (pose wire format). In-flight implementation this design
 aligns with: PR #17 (deterministic stratified splitter), PR #18 (champion
 training script + CI smoke test), PR #19 (holdout evaluation), PR #20
 (champion/challenger promotion gate). Where this document proposes beyond
@@ -55,7 +55,7 @@ Deterministic pipeline per label string:
    (master plan §9, open question 1).
 
 Clip → Label shape (decided): the farm stores **one label row per
-`(clip_id, trick_name)`** (`DATABASE_DESIGN.md` §1.1) — one-to-many at
+`(clip_id, trick_name)`** (`BACKEND_DESIGN.md` §1.1) — one-to-many at
 every level (Source → Clip → Label). The export is already
 label-granular (§1), so the dataset builder consumes one
 `(clip_id, raw trick name)` row per export row and canonicalizes each
@@ -312,7 +312,7 @@ On fixture regression (master plan §6), in order:
   `version` (`trick-v<major>.<minor>-rb<N>`, e.g. `trick-v1.3-rb1`;
   versions are never re-published, so the rollback needs its own) with
   `promoted_at = now()`. The manifest follows because "current" is the
-  row with the greatest non-null `promoted_at` (DATABASE_DESIGN.md §4).
+  row with the greatest non-null `promoted_at` (BACKEND_DESIGN.md §4).
   No retraining, no re-point endpoint — see MODEL_CONTRACT.md §5 for
   the full procedure.
 

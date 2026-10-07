@@ -6,8 +6,8 @@ exactly what the client must do to run the trick-detection model
 on-device. It implements the "Export + deploy" step of master plan §6
 (`https://github.com/hoiekim/turnip-farm/blob/main/docs/MASTER_PLAN.md`)
 and the OTA flow of §5.4. Companion docs: the farm's
-`DATABASE_DESIGN.md` (`models` table, `POST /api/models`,
-`GET /api/models/current`), `TKP1.md` (pose wire format), and
+`BACKEND_DESIGN.md` (`models` table, `POST /api/models`,
+`GET /api/models/current`), `POSE_FORMAT.md` (pose wire format), and
 `TRAINING_DESIGN.md` (how champions are produced).
 
 ## 1. Manifest format
@@ -15,7 +15,7 @@ and the OTA flow of §5.4. Companion docs: the farm's
 Served by `GET /api/models/current`, assembled from the farm's
 `models` row (plus `label_taxonomy` for the vocabulary). The JSON keys
 match the farm column names exactly, so an implementer reading
-`DATABASE_DESIGN.md` finds every field:
+`BACKEND_DESIGN.md` finds every field:
 
 ```jsonc
 {
@@ -95,7 +95,7 @@ Notes:
    `min_client_version`, `input_desc`, `output_desc`,
    `val_metrics` JSONB, `holdout_report_r2_key`, `training_run_id`,
    and `promoted_at = now()`. The current model is defined as the row
-   with the greatest non-null `promoted_at` (DATABASE_DESIGN.md §4),
+   with the greatest non-null `promoted_at` (BACKEND_DESIGN.md §4),
    so promotion IS the insert — there is no `current` flag to flip.
    Versions are immutable: an existing `version` → `409
    VERSION_EXISTS` (bump the version instead). Old rows are retained
