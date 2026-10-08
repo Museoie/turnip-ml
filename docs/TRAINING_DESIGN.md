@@ -121,9 +121,8 @@ through `label_taxonomy` at the pinned `taxonomy_version` (above).
 - **Output:** trick segments in **source-frame coordinates** — absolute
   frame indices into the source's canonical 10 Hz sequence — each with
   `trick_names: [...]` (canonical names) and derived `is_combo`.
-- This is detection + naming, not pose estimation. Pose quality is gated
-  separately by the existing `PoseAccuracy` harness and CI baseline
-  (master plan §6, "What stays"); fine-tuning MoveNet is off the table.
+- This is detection + naming, not pose estimation. Pose estimation is
+  MoveNet's job; fine-tuning MoveNet is off the table (master plan §6).
 
 ## 4. Architecture
 
@@ -225,8 +224,8 @@ evaluator (PR #19) computes the core set above; mAP is the proposed
 promotion-facing roll-up.
 
 Deliberately **not** PCK: PCK is a pose-estimation metric. Pose
-estimation is MoveNet's job and is gated separately by the
-`PoseAccuracy` CI baseline (per the PR #19 discussion).
+estimation is MoveNet's job, and fine-tuning it is off the table
+(per the PR #19 discussion).
 
 ### 6.2 Holdout protocol
 
