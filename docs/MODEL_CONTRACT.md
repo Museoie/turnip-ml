@@ -24,6 +24,8 @@ match the farm column names exactly, so an implementer reading
   "taxonomy_version": 7,              // models.taxonomy_version
   "r2_key": "models/trick-v1.3.mlmodelc.zip",
                                       // models.r2_key
+  "url": "<presigned R2 GET, 15-minute expiry>",
+                                      // derived at serve time from models.r2_key
   "sha256": "<hex of the zip bytes>", // models.sha256 (NOT NULL)
   "byte_size": 1843200,               // models.byte_size
   "min_client_version": "0.2.0",      // models.min_client_version
@@ -68,6 +70,9 @@ are no phantom fields:
 - `vocabulary` — the full canonical vocabulary at the row's
   `taxonomy_version`, assembled server-side from `label_taxonomy`
   (`canonical` names + `aliases`), not stored on the `models` row.
+- `url` — not a column: a presigned R2 GET for `r2_key`, minted at
+  serve time (15-minute expiry). The client downloads the artifact
+  from `url`; `r2_key` is retained for provenance and debugging.
 
 Notes:
 
@@ -183,7 +188,7 @@ space from there.
   launch/foreground — the contract it speaks is the §1 manifest.)
 - Update iff `version` differs from the active model AND the
   client version ≥ `min_client_version`.
-- Download the artifact (R2 URL or presigned GET from the manifest)
+- Download the artifact from the manifest's presigned `url`
   streamed to a temp file; verify `sha256` (and `byte_size`) **before**
   touching the active model.
 - **Atomic swap:** verify → move into place → activate on the next
