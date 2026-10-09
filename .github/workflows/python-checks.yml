@@ -1,14 +1,12 @@
-# Python lint / format / type-check for the pose-accuracy harness.
+# Python lint / format / type-check.
 #
-# The pose-accuracy gate validates scores, but nothing checked code quality.
 # On PRs touching Python files this runs:
 #   ruff check          (lint)
 #   ruff format --check (formatting)
-#   mypy PoseAccuracy   (type-check)
-# All tool versions pinned, matching the repo's pinned-dependency convention
-# (requirements.txt pins ==, actions pin to SHAs). The checks are hermetic:
-# only the tools are installed, never the harness deps — mypy runs with
-# ignore_missing_imports (see pyproject.toml) so fork PRs need no secrets.
+#   mypy .              (type-check; skipped while the tree has no Python files)
+# All tool versions pinned (actions pin to SHAs). The checks are hermetic:
+# only the tools are installed — mypy runs with ignore_missing_imports
+# (see pyproject.toml) so fork PRs need no secrets.
 name: Python checks
 
 on:
@@ -52,5 +50,10 @@ jobs:
       - name: ruff format --check
         run: ruff format --check .
 
-      - name: mypy PoseAccuracy
-        run: mypy PoseAccuracy
+      - name: mypy
+        run: |
+          if git ls-files '*.py' | grep -q .; then
+            mypy .
+          else
+            echo "no Python files in tree; skipping mypy"
+          fi
