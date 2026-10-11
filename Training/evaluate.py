@@ -292,10 +292,11 @@ def compute_metrics(
         for pi, (ps, pe, pnames) in enumerate(psegs):
             for name in pnames:
                 name_entry(name)["predicted"] += 1
-            if pi not in matched_pred:
-                # Zero IoU against every ground-truth segment: hallucinated.
-                if all(temporal_iou((ps, pe), (gs, ge)) == 0.0 for gs, ge, _ in gsegs):
-                    n_bg_fp += 1
+            # Zero IoU against every ground-truth segment: hallucinated.
+            if pi not in matched_pred and all(
+                temporal_iou((ps, pe), (gs, ge)) == 0.0 for gs, ge, _ in gsegs
+            ):
+                n_bg_fp += 1
         for gi, pi, _ in matches:
             if gsegs[gi][2] == psegs[pi][2]:
                 for name in gsegs[gi][2]:
