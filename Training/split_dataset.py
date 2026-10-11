@@ -4,15 +4,17 @@
 Splits a training-sample manifest into train / validation / holdout sets for
 the trick-detection training pipeline (see Training/README.md).
 
-Contract (turnip-ml#12):
+Contract:
   - Target ratios 80/10/10 (train/val/holdout), configurable.
   - Stratified by ``user_id``: every sample from one user lands in a single
     split, so no user's clips ever leak across splits.
   - ``holdout_ids`` pins the admin-curated holdout set (poisoning defense):
     pinned samples are never trained on — and neither are their siblings,
     because the whole user goes to holdout with them.
-  - Deterministic and seeded: the same manifest + seed always produces the
-    byte-identical mapping, so training runs are reproducible.
+  - Deterministic and seeded: the same manifest + seed + Python interpreter
+    version always produces the byte-identical mapping, so training runs are
+    reproducible (CPython does not guarantee ``random.Random`` shuffle order
+    stable across interpreter versions).
 
 User integrity is the hard constraint; the ratios are targets. Users are
 indivisible, so the realized ratios only approximate 80/10/10 (e.g. a
@@ -20,7 +22,9 @@ single-user manifest lands 100% in train).
 
 Determinism: all ordering derives from sorted ids plus a seeded
 ``random.Random``; no timestamps, no unseeded RNG, no dict-iteration order
-dependence. Input record order does not affect the result.
+dependence. Input record order does not affect the result. Byte-identical
+reproduction additionally requires the same Python interpreter version:
+CPython does not guarantee ``random.Random`` shuffle order across versions.
 
 Usage:
   split_dataset.py --in manifest.jsonl --out split.json [--seed 0]
@@ -86,14 +90,18 @@ def split_records(
     """
     _check_ratios(train_ratio, val_ratio, holdout_ratio)
     pairs = _normalize(records)
-    if not pairs:
-        return {}
 
+    # Validate holdout ids even for an empty manifest: a stale holdout-ids
+    # file against an empty/wrong manifest must fail closed, not silently
+    # write an empty split.json.
     pinned = {str(h) for h in holdout_ids}
     known = {sid for sid, _ in pairs}
     unknown = sorted(pinned - known)
     if unknown:
         raise ValueError(f"holdout_ids not present in manifest: {unknown}")
+
+    if not pairs:
+        return {}
 
     # Group samples per user; canonical (sorted) order everywhere for determinism.
     by_user: dict[str, list[str]] = {}
@@ -123,7 +131,8 @@ def split_records(
         "holdout": holdout_ratio * total,
     }
     rng = random.Random(seed)
-    rest = sorted(u for u in by_user if u not in set(pinned_users))
+    pinned_set = set(pinned_users)
+    rest = sorted(u for u in by_user if u not in pinned_set)
     rng.shuffle(rest)
     for uid in rest:
         # Split with the largest remaining deficit; ties break toward train.
@@ -161,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", dest="out", required=True,
                         help="output JSON path {sample_id: split}")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                        help="RNG seed; same manifest + seed = byte-identical output")
+                        help="RNG seed; same manifest + seed + interpreter = byte-identical output")
     parser.add_argument("--train-ratio", type=float, default=DEFAULT_RATIOS[0])
     parser.add_argument("--val-ratio", type=float, default=DEFAULT_RATIOS[1])
     parser.add_argument("--holdout-ratio", type=float, default=DEFAULT_RATIOS[2])

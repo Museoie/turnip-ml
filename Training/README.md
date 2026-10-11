@@ -13,9 +13,10 @@ what this repo validates; see the root README for repo-wide conventions.
 ## Determinism contract
 
 Every randomized step in this directory is seeded, and the seed is part of
-the artifact: the same manifest + seed always yields the byte-identical
-output. No timestamps, no unseeded RNG, no dependence on input order.
-A training run that cannot be reproduced byte-for-byte is a bug.
+the artifact: the same manifest + seed + Python interpreter version always
+yields the byte-identical output. No timestamps, no unseeded RNG, no
+dependence on input order. A training run that cannot be reproduced
+byte-for-byte on the same interpreter is a bug.
 
 ## Splitting a manifest
 
