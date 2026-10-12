@@ -53,7 +53,7 @@ import argparse
 import json
 import math
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -93,8 +93,9 @@ def metric_value(metrics: dict[str, Any], name: str, path: Path) -> float:
     return float(value)
 
 
-def decide(champion: float, challenger: float, threshold: float,
-           metric: str) -> tuple[str, float, str]:
+def decide(
+    champion: float, challenger: float, threshold: float, metric: str
+) -> tuple[str, float, str]:
     """Pure decision function.
 
     Returns (decision, improvement, reason) with decision "promote" or
@@ -105,16 +106,28 @@ def decide(champion: float, challenger: float, threshold: float,
     """
     if champion == 0.0:
         if challenger > 0.0:
-            return ("promote", float("inf"),
-                    f"champion {metric}=0, challenger={challenger:.6f} > 0")
-        return ("archive", 0.0,
-                f"champion {metric}=0, challenger={challenger:.6f}: no improvement")
+            return (
+                "promote",
+                float("inf"),
+                f"champion {metric}=0, challenger={challenger:.6f} > 0",
+            )
+        return (
+            "archive",
+            0.0,
+            f"champion {metric}=0, challenger={challenger:.6f}: no improvement",
+        )
     improvement = (challenger - champion) / abs(champion)
     if improvement >= threshold:
-        return ("promote", improvement,
-                f"relative improvement {improvement:.4%} >= threshold {threshold:.4%}")
-    return ("archive", improvement,
-            f"relative improvement {improvement:.4%} < threshold {threshold:.4%}")
+        return (
+            "promote",
+            improvement,
+            f"relative improvement {improvement:.4%} >= threshold {threshold:.4%}",
+        )
+    return (
+        "archive",
+        improvement,
+        f"relative improvement {improvement:.4%} < threshold {threshold:.4%}",
+    )
 
 
 def load_registry(path: Path) -> list[Any]:
@@ -130,8 +143,13 @@ def load_registry(path: Path) -> list[Any]:
     return data
 
 
-def run(champion_path: Path, challenger_path: Path, metric: str,
-        threshold: float, registry_path: Path) -> tuple[dict[str, Any], int]:
+def run(
+    champion_path: Path,
+    challenger_path: Path,
+    metric: str,
+    threshold: float,
+    registry_path: Path,
+) -> tuple[dict[str, Any], int]:
     """Evaluate the gate. Returns (decision_record, exit_code)."""
     champion_metrics = load_metrics(champion_path)
     challenger_metrics = load_metrics(challenger_path)
@@ -140,13 +158,12 @@ def run(champion_path: Path, challenger_path: Path, metric: str,
 
     decision, improvement, reason = decide(champion_v, challenger_v, threshold, metric)
     record = {
-        "decided_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "decided_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "metric": metric,
         "threshold": round(threshold, 6),
         "champion_metric": round(champion_v, 6),
         "challenger_metric": round(challenger_v, 6),
-        "improvement": (round(improvement, 6)
-                        if math.isfinite(improvement) else "inf"),
+        "improvement": (round(improvement, 6) if math.isfinite(improvement) else "inf"),
         "decision": decision,
         "reason": reason,
         "champion_metrics": champion_metrics,
@@ -169,18 +186,32 @@ def run(champion_path: Path, challenger_path: Path, metric: str,
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Champion/challenger promotion gate.")
-    p.add_argument("--champion", required=True, type=Path,
-                   help="metrics.json for the current champion")
-    p.add_argument("--challenger", required=True, type=Path,
-                   help="metrics.json for the challenger")
-    p.add_argument("--metric", default=DEFAULT_METRIC,
-                   help=f"validation metric key (default: {DEFAULT_METRIC})")
-    p.add_argument("--threshold", default=DEFAULT_THRESHOLD, type=float,
-                   help="minimum relative improvement to promote "
-                        f"(default: {DEFAULT_THRESHOLD})")
-    p.add_argument("--registry", default=Path(DEFAULT_REGISTRY), type=Path,
-                   help=f"registry file to append the decision to "
-                        f"(default: {DEFAULT_REGISTRY})")
+    p.add_argument(
+        "--champion",
+        required=True,
+        type=Path,
+        help="metrics.json for the current champion",
+    )
+    p.add_argument(
+        "--challenger", required=True, type=Path, help="metrics.json for the challenger"
+    )
+    p.add_argument(
+        "--metric",
+        default=DEFAULT_METRIC,
+        help=f"validation metric key (default: {DEFAULT_METRIC})",
+    )
+    p.add_argument(
+        "--threshold",
+        default=DEFAULT_THRESHOLD,
+        type=float,
+        help=f"minimum relative improvement to promote (default: {DEFAULT_THRESHOLD})",
+    )
+    p.add_argument(
+        "--registry",
+        default=Path(DEFAULT_REGISTRY),
+        type=Path,
+        help=f"registry file to append the decision to (default: {DEFAULT_REGISTRY})",
+    )
     return p.parse_args(argv)
 
 
@@ -188,9 +219,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         if not math.isfinite(args.threshold) or args.threshold < 0:
-            raise GateError(f"threshold must be a finite number >= 0, got {args.threshold}")
-        record, code = run(args.champion, args.challenger, args.metric,
-                           args.threshold, args.registry)
+            raise GateError(
+                f"threshold must be a finite number >= 0, got {args.threshold}"
+            )
+        record, code = run(
+            args.champion, args.challenger, args.metric, args.threshold, args.registry
+        )
     except GateError as e:
         print(f"promote: error: {e}", file=sys.stderr)
         return EXIT_ERROR
