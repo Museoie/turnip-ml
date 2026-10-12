@@ -6,8 +6,8 @@ what this repo validates; see the root README for repo-wide conventions.
 
 ## Layout
 
-- `split_dataset.py` — deterministic stratified train/val/holdout splitter
-  (turnip-ml#12). See its docstring for the full contract.
+- `split_dataset.py` — deterministic train/val/holdout splitter grouped by
+  `source_id` (turnip-ml#12). See its docstring for the full contract.
 - `tests/` — unit tests (`python -m unittest discover -s Training/tests -t .`).
 
 ## Determinism contract
@@ -27,8 +27,9 @@ python Training/split_dataset.py \
 ```
 
 `manifest.jsonl` carries one JSON object per line with `sample_id` and
-`user_id` (extra fields are ignored). `admin_holdout.txt` lists the
-admin-curated holdout sample ids, one per line — those samples, and every
-sibling sample from the same users, are pinned to holdout and never trained
-on (poisoning defense). `split.json` maps each sample id to
+`source_id` (extra fields are ignored). Splits group by source because
+training data carries no account identifier (`docs/TRAINING_DESIGN.md`
+§2.6). `admin_holdout.txt` lists the admin-curated holdout sample ids, one
+per line — those samples, and every sibling sample from the same sources,
+are pinned to holdout and never trained on (poisoning defense). `split.json` maps each sample id to
 `train` / `val` / `holdout` with sorted keys.

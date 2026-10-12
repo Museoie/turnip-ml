@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Deterministic stratified train/val/holdout split by user_id.
+"""Deterministic train/val/holdout split grouped by source_id.
 
 Splits a training-sample manifest into train / validation / holdout sets for
 the trick-detection training pipeline (see Training/README.md).
 
 Contract:
   - Target ratios 80/10/10 (train/val/holdout), configurable.
-  - Stratified by ``user_id``: every sample from one user lands in a single
-    split, so no user's clips ever leak across splits.
+  - Grouped by ``source_id``: every sample from one source lands in a
+    single split, so no source's clips ever leak across splits. Training
+    data carries no account identifier, so one person's different sources
+    can land in different splits; the admin-curated holdout is the check
+    on that.
   - ``holdout_ids`` pins the admin-curated holdout set (poisoning defense):
     pinned samples are never trained on — and neither are their siblings,
-    because the whole user goes to holdout with them.
+    because the whole source goes to holdout with them.
   - Deterministic and seeded: the same manifest + seed + Python interpreter
     version always produces the byte-identical mapping, so training runs are
     reproducible (CPython does not guarantee ``random.Random`` shuffle order
     stable across interpreter versions).
 
-User integrity is the hard constraint; the ratios are targets. Users are
-indivisible, so the realized ratios only approximate 80/10/10 (e.g. a
-single-user manifest lands 100% in train).
+Source integrity is the hard constraint; the ratios are targets. Sources
+are indivisible, so the realized ratios only approximate 80/10/10 (e.g. a
+single-source manifest lands 100% in train).
 
 Determinism: all ordering derives from sorted ids plus a seeded
 ``random.Random``; no timestamps, no unseeded RNG, no dict-iteration order
@@ -30,7 +33,7 @@ Usage:
   split_dataset.py --in manifest.jsonl --out split.json [--seed 0]
                    [--train-ratio 0.8 --val-ratio 0.1 --holdout-ratio 0.1]
                    [--holdout-ids holdout.txt]
-Input JSONL: one object per line, each with "sample_id" and "user_id"
+Input JSONL: one object per line, each with "sample_id" and "source_id"
 (extra fields are ignored). ``--holdout-ids`` is a text file with one
 sample id per line.
 Output JSON: {"<sample_id>": "train"|"val"|"holdout"}, keys sorted.
@@ -58,7 +61,7 @@ def _check_ratios(train_ratio: float, val_ratio: float, holdout_ratio: float) ->
 
 
 def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str]]:
-    """Validate records into (sample_id, user_id) pairs; fail closed."""
+    """Validate records into (sample_id, source_id) pairs; fail closed."""
     pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
     for i, rec in enumerate(records):
@@ -66,16 +69,16 @@ def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str]]:
             # ValueError is this module's single fail-closed error type.
             raise ValueError(f"record {i} is not an object: {rec!r}")  # noqa: TRY004
         sid = rec.get("sample_id")
-        uid = rec.get("user_id")
-        if sid is None or uid is None or str(sid) == "" or str(uid) == "":
+        src = rec.get("source_id")
+        if sid is None or src is None or str(sid) == "" or str(src) == "":
             raise ValueError(
-                f"record {i} needs non-empty sample_id and user_id: {rec!r}"
+                f"record {i} needs non-empty sample_id and source_id: {rec!r}"
             )
-        sid, uid = str(sid), str(uid)
+        sid, src = str(sid), str(src)
         if sid in seen:
             raise ValueError(f"duplicate sample_id: {sid!r}")
         seen.add(sid)
-        pairs.append((sid, uid))
+        pairs.append((sid, src))
     return pairs
 
 
@@ -88,7 +91,7 @@ def split_records(
     holdout_ratio: float = DEFAULT_RATIOS[2],
     holdout_ids: Iterable[str] = (),
 ) -> dict[str, str]:
-    """Assign each sample to train/val/holdout, stratified by user_id.
+    """Assign each sample to train/val/holdout, grouped by source_id.
 
     Returns {sample_id: split}. See the module docstring for the contract.
     """
@@ -107,26 +110,27 @@ def split_records(
     if not pairs:
         return {}
 
-    # Group samples per user; canonical (sorted) order everywhere for determinism.
-    by_user: dict[str, list[str]] = {}
-    for sid, uid in pairs:
-        by_user.setdefault(uid, []).append(sid)
-    for sids in by_user.values():
+    # Group samples per source; canonical (sorted) order everywhere for
+    # determinism.
+    by_source: dict[str, list[str]] = {}
+    for sid, src in pairs:
+        by_source.setdefault(src, []).append(sid)
+    for sids in by_source.values():
         sids.sort()
 
     assignment: dict[str, str] = {}
     counts = {s: 0 for s in SPLITS}
 
-    # Admin-curated holdout: a pinned sample pulls its whole user into
-    # holdout, so no user straddles the holdout boundary (poisoning defense).
-    pinned_users = sorted({uid for sid, uid in pairs if sid in pinned})
-    for uid in pinned_users:
-        for sid in by_user[uid]:
+    # Admin-curated holdout: a pinned sample pulls its whole source into
+    # holdout, so no source straddles the holdout boundary (poisoning defense).
+    pinned_sources = sorted({src for sid, src in pairs if sid in pinned})
+    for src in pinned_sources:
+        for sid in by_source[src]:
             assignment[sid] = "holdout"
-        counts["holdout"] += len(by_user[uid])
+        counts["holdout"] += len(by_source[src])
 
-    # Remaining users: seeded shuffle, then greedy deficit-filling against the
-    # ratio targets. The seed decides *which* users land where; the greedy
+    # Remaining sources: seeded shuffle, then greedy deficit-filling against
+    # the ratio targets. The seed decides *which* sources land where; the greedy
     # pass keeps the realized ratios near the targets.
     total = len(pairs)
     targets = {
@@ -135,15 +139,15 @@ def split_records(
         "holdout": holdout_ratio * total,
     }
     rng = random.Random(seed)
-    pinned_set = set(pinned_users)
-    rest = sorted(u for u in by_user if u not in pinned_set)
+    pinned_set = set(pinned_sources)
+    rest = sorted(s for s in by_source if s not in pinned_set)
     rng.shuffle(rest)
-    for uid in rest:
+    for src in rest:
         # Split with the largest remaining deficit; ties break toward train.
         best = max(SPLITS, key=lambda s: (targets[s] - counts[s], -SPLITS.index(s)))
-        for sid in by_user[uid]:
+        for sid in by_source[src]:
             assignment[sid] = best
-        counts[best] += len(by_user[uid])
+        counts[best] += len(by_source[src])
 
     return assignment
 
@@ -173,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         "--in",
         dest="inp",
         required=True,
-        help="input manifest as JSONL (sample_id, user_id per line)",
+        help="input manifest as JSONL (sample_id, source_id per line)",
     )
     parser.add_argument(
         "--out", dest="out", required=True, help="output JSON path {sample_id: split}"
