@@ -44,10 +44,14 @@ class EvaluateTest(unittest.TestCase):
         out = self.tmp / "report.json"
         rc = evaluate.main(
             [
-                "--predictions", str(self.pred_path),
-                "--split", str(self.split_path),
-                "--samples-dir", str(self.samples_dir),
-                "--out", str(out),
+                "--predictions",
+                str(self.pred_path),
+                "--split",
+                str(self.split_path),
+                "--samples-dir",
+                str(self.samples_dir),
+                "--out",
+                str(out),
                 *extra,
             ]
         )
@@ -78,8 +82,13 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(report["n_unmatched_predictions"], 0)
         self.assertEqual(
             report["per_name"]["gainer"],
-            {"support": 1, "predicted": 1, "true_positives": 1,
-             "precision": 1.0, "recall": 1.0},
+            {
+                "support": 1,
+                "predicted": 1,
+                "true_positives": 1,
+                "precision": 1.0,
+                "recall": 1.0,
+            },
         )
 
     def test_empty_predictions(self) -> None:
@@ -114,10 +123,14 @@ class EvaluateTest(unittest.TestCase):
         )
         out = self.tmp / "report.json"
         base = [
-            "--predictions", str(self.pred_path),
-            "--split", str(self.split_path),
-            "--samples-dir", str(self.samples_dir),
-            "--out", str(out),
+            "--predictions",
+            str(self.pred_path),
+            "--split",
+            str(self.split_path),
+            "--samples-dir",
+            str(self.samples_dir),
+            "--out",
+            str(out),
         ]
         self.assertEqual(evaluate.main(base), 0)
         first = out.read_bytes()
@@ -144,9 +157,7 @@ class EvaluateTest(unittest.TestCase):
         # GT (0,10)/gainer with competing preds (0,6)/cork (IoU 0.6) and
         # (0,9)/gainer (IoU 0.9): greedy best-IoU matches gainer and keeps
         # the name match; first-fit would match cork and lose it.
-        self._sample(
-            "h1", [{"name": "gainer", "start_frame": 0, "end_frame": 10}]
-        )
+        self._sample("h1", [{"name": "gainer", "start_frame": 0, "end_frame": 10}])
         self._split({"h1": "holdout"})
         self._predictions(
             {
@@ -176,9 +187,7 @@ class EvaluateTest(unittest.TestCase):
 
     def test_name_mismatch_is_detection_not_match(self) -> None:
         self._basic_holdout()
-        self._predictions(
-            {"h1": [{"start_frame": 4, "end_frame": 20, "name": "cork"}]}
-        )
+        self._predictions({"h1": [{"start_frame": 4, "end_frame": 20, "name": "cork"}]})
         report = self._run()
         self.assertEqual(report["detection_rate"], 1.0)  # localized...
         self.assertEqual(report["precision"], 0.0)  # ...but misnamed
@@ -188,9 +197,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(report["per_name"]["cork"]["true_positives"], 0)
 
     def test_combo_name_forms_are_equal(self) -> None:
-        self._sample(
-            "h1", [{"name": "gainer+cork", "start_frame": 4, "end_frame": 20}]
-        )
+        self._sample("h1", [{"name": "gainer+cork", "start_frame": 4, "end_frame": 20}])
         self._split({"h1": "holdout"})
         self._predictions(
             {
@@ -227,10 +234,14 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluate.main(
                 [
-                    "--predictions", str(self.pred_path),
-                    "--split", str(self.split_path),
-                    "--samples-dir", str(self.samples_dir),
-                    "--out", str(self.tmp / "report.json"),
+                    "--predictions",
+                    str(self.pred_path),
+                    "--split",
+                    str(self.split_path),
+                    "--samples-dir",
+                    str(self.samples_dir),
+                    "--out",
+                    str(self.tmp / "report.json"),
                 ]
             )
 
@@ -242,10 +253,14 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluate.main(
                 [
-                    "--predictions", str(self.pred_path),
-                    "--split", str(self.split_path),
-                    "--samples-dir", str(self.samples_dir),
-                    "--out", str(self.tmp / "report.json"),
+                    "--predictions",
+                    str(self.pred_path),
+                    "--split",
+                    str(self.split_path),
+                    "--samples-dir",
+                    str(self.samples_dir),
+                    "--out",
+                    str(self.tmp / "report.json"),
                 ]
             )
 
@@ -257,10 +272,14 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluate.main(
                 [
-                    "--predictions", str(self.pred_path),
-                    "--split", str(self.split_path),
-                    "--samples-dir", str(self.samples_dir),
-                    "--out", str(self.tmp / "report.json"),
+                    "--predictions",
+                    str(self.pred_path),
+                    "--split",
+                    str(self.split_path),
+                    "--samples-dir",
+                    str(self.samples_dir),
+                    "--out",
+                    str(self.tmp / "report.json"),
                 ]
             )
 
@@ -281,10 +300,14 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluate.main(
                 [
-                    "--predictions", str(self.pred_path),
-                    "--split", str(self.split_path),
-                    "--samples-dir", str(self.samples_dir),
-                    "--out", str(self.tmp / "report.json"),
+                    "--predictions",
+                    str(self.pred_path),
+                    "--split",
+                    str(self.split_path),
+                    "--samples-dir",
+                    str(self.samples_dir),
+                    "--out",
+                    str(self.tmp / "report.json"),
                 ]
             )
 
@@ -305,10 +328,14 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluate.main(
                 [
-                    "--predictions", str(self.pred_path),
-                    "--split", str(self.split_path),
-                    "--samples-dir", str(self.samples_dir),
-                    "--out", str(self.tmp / "report.json"),
+                    "--predictions",
+                    str(self.pred_path),
+                    "--split",
+                    str(self.split_path),
+                    "--samples-dir",
+                    str(self.samples_dir),
+                    "--out",
+                    str(self.tmp / "report.json"),
                 ]
             )
 
@@ -320,10 +347,14 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluate.main(
                 [
-                    "--predictions", str(self.pred_path),
-                    "--split", str(self.split_path),
-                    "--samples-dir", str(self.samples_dir),
-                    "--out", str(self.tmp / "report.json"),
+                    "--predictions",
+                    str(self.pred_path),
+                    "--split",
+                    str(self.split_path),
+                    "--samples-dir",
+                    str(self.samples_dir),
+                    "--out",
+                    str(self.tmp / "report.json"),
                 ]
             )
 
@@ -334,9 +365,12 @@ class EvaluateTest(unittest.TestCase):
         )
         rc = evaluate.main(
             [
-                "--predictions", str(self.pred_path),
-                "--split", str(self.split_path),
-                "--samples-dir", str(self.samples_dir),
+                "--predictions",
+                str(self.pred_path),
+                "--split",
+                str(self.split_path),
+                "--samples-dir",
+                str(self.samples_dir),
             ]
         )
         self.assertEqual(rc, 0)
@@ -347,11 +381,16 @@ class EvaluateTest(unittest.TestCase):
         self._predictions({})
         rc = evaluate.main(
             [
-                "--predictions", str(self.pred_path),
-                "--split", str(self.split_path),
-                "--samples-dir", str(self.samples_dir),
-                "--out", str(self.tmp / "report.json"),
-                "--iou-threshold", "1.5",
+                "--predictions",
+                str(self.pred_path),
+                "--split",
+                str(self.split_path),
+                "--samples-dir",
+                str(self.samples_dir),
+                "--out",
+                str(self.tmp / "report.json"),
+                "--iou-threshold",
+                "1.5",
             ]
         )
         self.assertEqual(rc, 2)

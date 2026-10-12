@@ -85,6 +85,7 @@ SPLITS = ("train", "val", "holdout")
 # Loading / validation (fail closed)
 # ---------------------------------------------------------------------------
 
+
 def _fail(msg: str) -> NoReturn:
     raise ValueError(msg)
 
@@ -112,8 +113,10 @@ def normalize_names(seg: dict[str, Any], where: str) -> frozenset[str]:
         _fail(f'{where}: segment has both "name" and "names"; use exactly one')
     if "names" in seg:
         raw = seg["names"]
-        if not isinstance(raw, list) or not raw or not all(
-            isinstance(n, str) and n for n in raw
+        if (
+            not isinstance(raw, list)
+            or not raw
+            or not all(isinstance(n, str) and n for n in raw)
         ):
             _fail(f'{where}: "names" must be a non-empty list of strings')
         names = frozenset(raw)
@@ -195,6 +198,7 @@ def load_ground_truth(
 # Matching
 # ---------------------------------------------------------------------------
 
+
 def temporal_iou(a: tuple[int, int], b: tuple[int, int]) -> float:
     lo = max(a[0], b[0])
     hi = min(a[1], b[1])
@@ -236,6 +240,7 @@ def match_segments(
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
+
 
 def r6(x: float) -> float:
     return round(float(x), 6)
@@ -311,8 +316,10 @@ def compute_metrics(
 
     precision, recall, f1 = prf(n_name_matches, total_pred, total_gt)
     detection_rate = n_detections / total_gt if total_gt else 1.0
-    name_acc = n_name_matches / n_detections if n_detections else (
-        1.0 if total_gt == 0 else 0.0
+    name_acc = (
+        n_name_matches / n_detections
+        if n_detections
+        else (1.0 if total_gt == 0 else 0.0)
     )
 
     per_name_out: dict[str, dict[str, float]] = {}
@@ -349,6 +356,7 @@ def compute_metrics(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
