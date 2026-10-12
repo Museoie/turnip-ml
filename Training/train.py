@@ -24,7 +24,7 @@ Artifacts in the out dir:
   metrics.json  sorted-key metrics incl. val accuracy and decoded segments
 
 Sample JSON format (one file per sample in samples_dir):
-  {"sample_id": ..., "user_id": ..., "fps": 10,
+  {"sample_id": ..., "fps": 10,
    "keypoints": [[[x, y, score] * 17] * n_frames],  # MoveNet-17 order
    "tricks": [{"name": ..., "start_frame": ..., "end_frame": ...}]}
 Multi-name segments label the window "a+b" (sorted); is_combo is derived.

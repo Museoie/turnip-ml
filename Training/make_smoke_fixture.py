@@ -50,16 +50,18 @@ BASE_POSE = [
     (0.56, 0.90),
 ]
 
-# (sample_id, user_id, [(trick_name, start_frame, end_frame)])
+# (sample_id, source_id, [(trick_name, start_frame, end_frame)]). source_id
+# groups samples as if cut from one source video, so the splitter's
+# source grouping has something to keep together.
 SAMPLES: list[tuple[str, str, list[tuple[str, int, int]]]] = [
-    ("smoke-001", "user-a", [("gainer", 4, 20)]),
-    ("smoke-002", "user-a", [("corkscrew", 8, 24)]),
-    ("smoke-003", "user-a", []),
-    ("smoke-004", "user-a", [("gainer", 4, 12), ("corkscrew", 20, 28)]),
-    ("smoke-005", "user-b", [("corkscrew", 4, 20)]),
-    ("smoke-006", "user-b", [("gainer", 12, 28)]),
-    ("smoke-007", "user-c", []),
-    ("smoke-008", "user-c", [("gainer", 4, 20)]),
+    ("smoke-001", "source-a", [("gainer", 4, 20)]),
+    ("smoke-002", "source-a", [("corkscrew", 8, 24)]),
+    ("smoke-003", "source-a", []),
+    ("smoke-004", "source-a", [("gainer", 4, 12), ("corkscrew", 20, 28)]),
+    ("smoke-005", "source-b", [("corkscrew", 4, 20)]),
+    ("smoke-006", "source-b", [("gainer", 12, 28)]),
+    ("smoke-007", "source-c", []),
+    ("smoke-008", "source-c", [("gainer", 4, 20)]),
 ]
 
 AMP = 0.18  # motion amplitude (fraction of frame)
@@ -114,11 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     samples_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_lines = []
-    for sample_id, user_id, tricks in SAMPLES:
+    for sample_id, source_id, tricks in SAMPLES:
         keypoints = make_sample(rng, tricks)
         rec = {
             "sample_id": sample_id,
-            "user_id": user_id,
             "fps": FPS,
             "keypoints": keypoints,
             "tricks": [
@@ -128,7 +129,9 @@ def main(argv: list[str] | None = None) -> int:
         with open(samples_dir / f"{sample_id}.json", "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
             fh.write("\n")
-        manifest_lines.append(json.dumps({"sample_id": sample_id, "user_id": user_id}))
+        manifest_lines.append(
+            json.dumps({"sample_id": sample_id, "source_id": source_id})
+        )
     with open(out / "manifest.jsonl", "w", encoding="utf-8") as fh:
         fh.write("\n".join(manifest_lines) + "\n")
     print(f"wrote {len(SAMPLES)} samples to {samples_dir}")

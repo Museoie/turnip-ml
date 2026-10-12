@@ -6,7 +6,8 @@ coords) with trick segments. Motion signatures are deliberately separable —
 the smoke run must reach 100% val accuracy; anything less is a
 training-pipeline bug, not data noise.
 
-- `manifest.jsonl` — one `{"sample_id", "user_id"}` per line (splitter input)
+- `manifest.jsonl` — one `{"sample_id", "source_id"}` per line (splitter
+  input); `source_id` groups samples as if cut from one source video
 - `split.json` — `{sample_id: train|val|holdout}`, produced by the real
   `split_dataset.py` (turnip-ml#12), `--seed 0`
 - `samples/*.json` — one sample per file (see `train.py` docstring for format)
