@@ -31,7 +31,7 @@ class EvaluateTest(unittest.TestCase):
     def _sample(self, sid: str, tricks: list[dict]) -> None:
         write_json(
             self.samples_dir / f"{sid}.json",
-            {"sample_id": sid, "user_id": "user-a", "fps": 10, "tricks": tricks},
+            {"sample_id": sid, "fps": 10, "tricks": tricks},
         )
 
     def _split(self, mapping: dict[str, str]) -> None:
