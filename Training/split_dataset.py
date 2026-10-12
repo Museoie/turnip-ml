@@ -35,13 +35,14 @@ Input JSONL: one object per line, each with "sample_id" and "user_id"
 sample id per line.
 Output JSON: {"<sample_id>": "train"|"val"|"holdout"}, keys sorted.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import random
 import sys
-from typing import Iterable, Mapping
+from collections.abc import Iterable, Mapping
 
 SPLITS = ("train", "val", "holdout")
 DEFAULT_SEED = 0
@@ -62,11 +63,14 @@ def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str]]:
     seen: set[str] = set()
     for i, rec in enumerate(records):
         if not isinstance(rec, Mapping):
-            raise ValueError(f"record {i} is not an object: {rec!r}")
+            # ValueError is this module's single fail-closed error type.
+            raise ValueError(f"record {i} is not an object: {rec!r}")  # noqa: TRY004
         sid = rec.get("sample_id")
         uid = rec.get("user_id")
         if sid is None or uid is None or str(sid) == "" or str(uid) == "":
-            raise ValueError(f"record {i} needs non-empty sample_id and user_id: {rec!r}")
+            raise ValueError(
+                f"record {i} needs non-empty sample_id and user_id: {rec!r}"
+            )
         sid, uid = str(sid), str(uid)
         if sid in seen:
             raise ValueError(f"duplicate sample_id: {sid!r}")
@@ -107,8 +111,8 @@ def split_records(
     by_user: dict[str, list[str]] = {}
     for sid, uid in pairs:
         by_user.setdefault(uid, []).append(sid)
-    for uid in by_user:
-        by_user[uid].sort()
+    for sids in by_user.values():
+        sids.sort()
 
     assignment: dict[str, str] = {}
     counts = {s: 0 for s in SPLITS}
@@ -165,17 +169,29 @@ def _read_jsonl(path: str) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--in", dest="inp", required=True,
-                        help="input manifest as JSONL (sample_id, user_id per line)")
-    parser.add_argument("--out", dest="out", required=True,
-                        help="output JSON path {sample_id: split}")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                        help="RNG seed; same manifest + seed + interpreter = byte-identical output")
+    parser.add_argument(
+        "--in",
+        dest="inp",
+        required=True,
+        help="input manifest as JSONL (sample_id, user_id per line)",
+    )
+    parser.add_argument(
+        "--out", dest="out", required=True, help="output JSON path {sample_id: split}"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="RNG seed; same manifest + seed + interpreter = byte-identical output",
+    )
     parser.add_argument("--train-ratio", type=float, default=DEFAULT_RATIOS[0])
     parser.add_argument("--val-ratio", type=float, default=DEFAULT_RATIOS[1])
     parser.add_argument("--holdout-ratio", type=float, default=DEFAULT_RATIOS[2])
-    parser.add_argument("--holdout-ids", default=None,
-                        help="text file with admin-curated holdout sample ids, one per line")
+    parser.add_argument(
+        "--holdout-ids",
+        default=None,
+        help="text file with admin-curated holdout sample ids, one per line",
+    )
     args = parser.parse_args(argv)
 
     holdout_ids: list[str] = []
@@ -197,8 +213,11 @@ def main(argv: list[str] | None = None) -> int:
 
     n = len(assignment)
     by_split = {s: sum(1 for v in assignment.values() if v == s) for s in SPLITS}
-    print(f"split {n} samples (seed={args.seed}): " +
-          ", ".join(f"{s}={by_split[s]}" for s in SPLITS), file=sys.stderr)
+    print(
+        f"split {n} samples (seed={args.seed}): "
+        + ", ".join(f"{s}={by_split[s]}" for s in SPLITS),
+        file=sys.stderr,
+    )
     return 0
 
 
