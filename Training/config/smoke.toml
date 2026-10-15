@@ -1,0 +1,25 @@
+# Smoke-test config for Training/train.py (turnip-ml#13).
+# Runs end-to-end on the tiny synthetic fixture in CI. Every hyperparameter
+# lives here — never in CLI folklore. Unknown keys fail closed (train.py).
+seed = 0
+
+# One-variable GPU-worker seam: "cpu" runs the numpy backend here;
+# "gpu" fails closed and points at Training/README.md ("Full run").
+compute = "cpu"
+
+split_path = "Training/fixtures/smoke/split.json"
+samples_dir = "Training/fixtures/smoke/samples"
+out_dir = "runs/smoke"
+
+# Windowing: 8 frames @10Hz = 0.8s windows, 0.4s stride.
+window_frames = 8
+window_stride = 4
+
+# Optimizer (full-batch gradient descent, softmax cross-entropy + L2).
+learning_rate = 0.5
+epochs = 200
+l2 = 0.0001
+
+# Fine-tune the champion: path to a model.npz from a previous run.
+# Empty = train from scratch.
+init_checkpoint = ""
