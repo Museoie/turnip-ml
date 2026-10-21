@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 .env/
+.env
 .pytest_cache/
 
 # ML artifacts — never commit large binaries; fetch or version them externally
