@@ -20,6 +20,13 @@ learning_rate = 0.5
 epochs = 200
 l2 = 0.0001
 
+# Class balance (TRAINING_DESIGN.md §2.7): each epoch's windows are sampled
+# with weight ∝ count**-class_balance_exponent per canonical name — a combo
+# window takes its rarest name's weight — and background windows are sampled
+# separately at background_ratio of the epoch sample (§2.5).
+class_balance_exponent = 0.5
+background_ratio = 0.2
+
 # Fine-tune the champion: path to a model.npz from a previous run.
 # Empty = train from scratch.
 init_checkpoint = ""
