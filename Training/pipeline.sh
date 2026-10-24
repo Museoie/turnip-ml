@@ -31,9 +31,7 @@
 #     against, so nothing is promoted unless BOOTSTRAP_CHAMPION=true, the
 #     maintainer's explicit choice to make this challenger the first
 #     champion (§6.3: the nightly path never promotes ungated);
-#   - a fixture regression: promotion is skipped, quarantine.json written
-#     (nothing here sends it: the workflow's farm job does, with
-#     Training/report_quarantine.py, before it advances the watermark);
+#   - a fixture regression: promotion is skipped, quarantine.json written;
 #   - a champion without metrics.json: the fixture gate runs, the
 #     promotion gate has nothing to compare and does not;
 #   - publishing runs only after a gated promotion, never after a
@@ -248,9 +246,8 @@ challenger the first champion."
     case $gate/$promotion in
       regression/*)
         STOP="Fixture gate: regression, so promotion was skipped; \
-$GATE_OUT/quarantine.json lists the changed sources. Only the \
-workflow's farm job sends it to the farm (Training/report_quarantine.py), \
-before it advances the watermark." ;;
+$GATE_OUT/quarantine.json lists the changed sources. Nothing sends it to \
+the farm yet." ;;
       pass/promote)
         stage_challenger
         STOP="Fixture gate: pass. Promotion: promote; the challenger is \
@@ -274,6 +271,17 @@ set; its new fixture scores are staged in $UPDATE."
     fi
     ;;
 esac
+# Person-leakage gap (§2.6, #42): val-minus-holdout for the promotion
+# metric and segment F1, written into the challenger's holdout report,
+# with the streak tracked in the registry. Runs before publish so the
+# published report carries the gap; a corrupt input fails the run
+# rather than publishing a model whose leakage went unmeasured.
+python Training/leakage_gap.py \
+  --metrics "$RUN/challenger/metrics.json" \
+  --report "$RUN/challenger/holdout_report.json" \
+  --split "$RUN/split.json" --samples-dir "$DATASET/samples" \
+  --registry "$REGISTRY" --promotion "$promotion" \
+  || die "leakage gap computation failed"
 # Publish (#16) only what both gates passed.
 if [ "$promotion" = promote ] && [ "${PUBLISH:-false}" = true ]; then
   python Training/publish_model.py --run "$RUN" --dataset "$DATASET"
@@ -307,19 +315,23 @@ def load(path):
         return json.load(fh)
 
 
+metrics = load(run / "challenger" / "metrics.json")
+report = load(run / "challenger" / "holdout_report.json")
+split = load(run / "split.json")
+gap = report.get("val_minus_holdout", {})
+
 outcome = {
     "fixture_gate": gate,
     "promotion": promotion,
     "champion_rescored": rescored == "true",
     "fixtures_scoreable": scoreable == "true",
+    "leakage_flagged": gap.get("flagged", False),
+    "leakage_streak": gap.get("streak_promoted_runs_over_threshold", 0),
 }
 (run / "outcome.json").write_text(
     json.dumps(outcome, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 )
 
-metrics = load(run / "challenger" / "metrics.json")
-report = load(run / "challenger" / "holdout_report.json")
-split = load(run / "split.json")
 counts = {s: sum(1 for v in split.values() if v == s) for s in ("train", "val", "holdout")}
 print("## Training pipeline run\n")
 print(f"- Split (samples): train {counts['train']}, val {counts['val']}, "
@@ -334,6 +346,17 @@ print("- Holdout: " + ", ".join(
         "n_predicted_segments",
     )
 ))
+if gap:
+    flag_note = (
+        " — FLAGGED: three consecutive promoted runs over threshold; "
+        "reopens how splits group sources (§2.6)"
+        if gap["flagged"] else ""
+    )
+    print(f"- Val-minus-holdout (§2.6): promotion {gap['promotion_metric']:+.4f}, "
+          f"segment_f1 {gap['segment_f1']:+.4f} "
+          f"(val_f1 {gap['val_f1']:.4f} vs holdout f1 {gap['holdout_f1']:.4f}); "
+          f"streak {gap['streak_promoted_runs_over_threshold']} promoted runs "
+          f"over 0.05{flag_note}")
 
 
 def scores_line(label, path):

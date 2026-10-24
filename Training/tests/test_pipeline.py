@@ -157,11 +157,13 @@ class PipelineTestCase(unittest.TestCase):
             )
 
 
-def outcome(gate, promotion, rescored=False, scoreable=True):
+def outcome(gate, promotion, rescored=False, scoreable=True, leakage_flagged=False, leakage_streak=0):
     return {
         "champion_rescored": rescored,
         "fixture_gate": gate,
         "fixtures_scoreable": scoreable,
+        "leakage_flagged": leakage_flagged,
+        "leakage_streak": leakage_streak,
         "promotion": promotion,
     }
 
@@ -256,10 +258,13 @@ class GatesTest(PipelineTestCase):
         self.assertEqual(self.outcome(), outcome("pass", "archive"))
         self.assertEqual(self.update_files(), [])
         registry = self.load(self.root / "data" / "registry.json")
+        # Gate records only: the log also carries leakage_gap records (#42),
+        # which have no gate/decision fields.
+        gates = [r for r in registry if "decision" in r]
         self.assertEqual(
-            [r.get("gate") for r in registry], ["fixture-regression", None]
+            [r.get("gate") for r in gates], ["fixture-regression", None]
         )
-        self.assertEqual([r["decision"] for r in registry], ["pass", "archive"])
+        self.assertEqual([r["decision"] for r in gates], ["pass", "archive"])
         summary = (self.root / "summary.md").read_text()
         self.assertIn("Champion fixture scores (recorded)", summary)
         self.assertIn("Fixture gate: pass", summary)
@@ -269,8 +274,9 @@ class GatesTest(PipelineTestCase):
         self.ok()
         self.ok()
         registry = self.load(self.root / "data" / "registry.json")
+        gates = [r for r in registry if "decision" in r]
         self.assertEqual(
-            [r["decision"] for r in registry], ["pass", "archive", "pass", "archive"]
+            [r["decision"] for r in gates], ["pass", "archive", "pass", "archive"]
         )
 
     def test_regression_skips_promotion_and_quarantines(self):
