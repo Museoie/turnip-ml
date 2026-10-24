@@ -157,7 +157,14 @@ class PipelineTestCase(unittest.TestCase):
             )
 
 
-def outcome(gate, promotion, rescored=False, scoreable=True, leakage_flagged=False, leakage_streak=0):
+def outcome(
+    gate,
+    promotion,
+    rescored=False,
+    scoreable=True,
+    leakage_flagged=False,
+    leakage_streak=0,
+):
     return {
         "champion_rescored": rescored,
         "fixture_gate": gate,
@@ -261,9 +268,7 @@ class GatesTest(PipelineTestCase):
         # Gate records only: the log also carries leakage_gap records (#42),
         # which have no gate/decision fields.
         gates = [r for r in registry if "decision" in r]
-        self.assertEqual(
-            [r.get("gate") for r in gates], ["fixture-regression", None]
-        )
+        self.assertEqual([r.get("gate") for r in gates], ["fixture-regression", None])
         self.assertEqual([r["decision"] for r in gates], ["pass", "archive"])
         summary = (self.root / "summary.md").read_text()
         self.assertIn("Champion fixture scores (recorded)", summary)
