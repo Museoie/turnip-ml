@@ -14,7 +14,6 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import evaluate
 import leakage_gap
 
 
@@ -151,6 +150,82 @@ class LeakageGapTest(unittest.TestCase):
         self.assertTrue(gap["flagged"])
         self.assertEqual(len(self._registry()), 3)
 
+    def test_streak_two_is_unflagged(self) -> None:
+        # Pins FLAG_STREAK: one prior over-threshold promoted run plus
+        # this one is streak 2, not flagged. A FLAG_STREAK = 2 mutant
+        # would flag here and fail this test.
+        self._write_inputs()
+        write_json(
+            self.registry_path,
+            [
+                {
+                    "kind": "leakage_gap",
+                    "promotion": "promote",
+                    "val_minus_holdout": {
+                        "promotion_metric": 0.2,
+                        "segment_f1": 0.1,
+                    },
+                }
+            ],
+        )
+        self.assertEqual(self._run("promote"), 0)
+        gap = self._report()["val_minus_holdout"]
+        self.assertEqual(gap["streak_promoted_runs_over_threshold"], 2)
+        self.assertFalse(gap["flagged"])
+
+    def test_combo_segment_decodes_to_both_names(self) -> None:
+        # A combo val segment must score as its names, not as one name.
+        self._write_inputs(
+            val_segments=[
+                {
+                    "sample_id": "v1",
+                    "name": "cork+backflip",
+                    "start_frame": 0,
+                    "end_frame": 8,
+                    "is_combo": True,
+                }
+            ]
+        )
+        # Ground truth: two tricks on the same window merge to one
+        # segment carrying both names.
+        write_json(
+            self.samples_dir / "v1.json",
+            {
+                "sample_id": "v1",
+                "fps": 10,
+                "tricks": [seg("cork", 0, 8), seg("backflip", 0, 8)],
+            },
+        )
+        self.assertEqual(self._run("archive"), 0)
+        gap = self._report()["val_minus_holdout"]
+        self.assertEqual(gap["val_f1"], 1.0)
+        self.assertEqual(gap["segment_f1"], 0.1)
+
+    def test_combo_decoding_rejects_malformed_names(self) -> None:
+        # parse_segment, not loose split: "cork+" has an empty component,
+        # and is_combo=True contradicts a single name. Both fail closed.
+        self._write_inputs()
+        for bad in [
+            {
+                "sample_id": "v1",
+                "name": "cork+",
+                "start_frame": 0,
+                "end_frame": 8,
+                "is_combo": True,
+            },
+            {
+                "sample_id": "v1",
+                "name": "cork",
+                "start_frame": 0,
+                "end_frame": 8,
+                "is_combo": True,
+            },
+        ]:
+            metrics = json.loads(self.metrics_path.read_text())
+            metrics["val_segments"] = [bad]
+            write_json(self.metrics_path, metrics)
+            self.assertEqual(self._run("promote"), 2)
+
     def test_streak_resets_on_archive(self) -> None:
         self._write_inputs()
         write_json(
@@ -237,6 +312,60 @@ class LeakageGapTest(unittest.TestCase):
         self.assertEqual(self._run("promote"), 2)
         self.assertEqual(self.report_path.read_text(), before)
         self.assertFalse(self.registry_path.exists())
+
+    def test_report_split_mismatch_fails_closed(self) -> None:
+        # The metrics-side tamper is covered above; the report side
+        # (inputs.split_sha256) must fail closed the same way.
+        self._write_inputs()
+        report = json.loads(self.report_path.read_text())
+        report["inputs"]["split_sha256"] = "0" * 64
+        write_json(self.report_path, report)
+        before = self.report_path.read_text()
+        self.assertEqual(self._run("promote"), 2)
+        self.assertEqual(self.report_path.read_text(), before)
+        self.assertFalse(self.registry_path.exists())
+
+    def test_exact_threshold_promotion_is_not_over(self) -> None:
+        # Strictly above 0.05: a promotion gap of exactly 0.05 is not
+        # over threshold, so the streak stays 0. A >= mutant fails here.
+        self._write_inputs(val_accuracy=0.75, holdout_f1=1.0, holdout_acc=0.7)
+        self.assertEqual(self._run("promote"), 0)
+        gap = self._report()["val_minus_holdout"]
+        self.assertEqual(gap["promotion_metric"], 0.05)
+        self.assertEqual(gap["segment_f1"], 0.0)
+        self.assertEqual(gap["streak_promoted_runs_over_threshold"], 0)
+        self.assertFalse(gap["flagged"])
+
+    def test_exact_threshold_segment_is_not_over(self) -> None:
+        # Same boundary on the segment-F1 side.
+        self._write_inputs(val_accuracy=0.7, holdout_f1=0.95, holdout_acc=0.7)
+        self.assertEqual(self._run("promote"), 0)
+        gap = self._report()["val_minus_holdout"]
+        self.assertEqual(gap["promotion_metric"], 0.0)
+        self.assertEqual(gap["segment_f1"], 0.05)
+        self.assertEqual(gap["streak_promoted_runs_over_threshold"], 0)
+        self.assertFalse(gap["flagged"])
+
+    def test_malformed_prior_gap_fails_closed(self) -> None:
+        # Replay validates recorded gaps: a non-numeric gap raises
+        # GapError (exit 2), and a missing gap key fails instead of
+        # silently reading as 0.
+        self._write_inputs()
+        for bad_gaps in [
+            {"promotion_metric": "0.2", "segment_f1": 0.1},
+            {"promotion_metric": 0.2},
+        ]:
+            write_json(
+                self.registry_path,
+                [
+                    {
+                        "kind": "leakage_gap",
+                        "promotion": "promote",
+                        "val_minus_holdout": bad_gaps,
+                    }
+                ],
+            )
+            self.assertEqual(self._run("promote"), 2)
 
     def test_val_segment_outside_val_fails(self) -> None:
         self._write_inputs(

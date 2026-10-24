@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Val-minus-holdout person-leakage gap (turnip-ml#42, TRAINING_DESIGN.md §2.6).
 
 Person leakage is a measured risk: the export carries no account
@@ -31,10 +30,10 @@ What it computes
 ----------------
 - promotion_metric gap: val_accuracy − holdout name_accuracy_given_detection.
 - segment_f1 gap: val segment F1 − holdout f1. Val F1 is computed on the
-  same footing as holdout F1: metrics.json's val_segments decoded
-  exactly as predict.py decodes them (name.split("+") into names), scored
-  by evaluate.compute_metrics against val ground truth at the report's
-  IoU threshold.
+  same footing as holdout F1: metrics.json's val_segments decoded by
+  evaluate.parse_segment (a combo label is its names, not one name),
+  scored by evaluate.compute_metrics against val ground truth at the
+  report's IoU threshold.
 - streak: consecutive promoted runs with either gap above 0.05 absolute.
   A promoted run at or under threshold, or a non-promoted run (archive,
   not-run), resets the streak to 0. A bootstrap run leaves it unchanged:
@@ -51,6 +50,14 @@ Outputs
 - A {"kind": "leakage_gap", ...} record is appended to the registry
   (atomic write, like promote.py). Other record kinds in the log are
   ignored when replaying the streak.
+- The report write and the registry append are separately atomic, not
+  jointly so, and records carry no run id: the streak replay counts
+  records, not runs. Retry rule: never re-run this step for a run whose
+  record is already in the registry — a retry after a registry append
+  appends a second record for the same run and inflates the streak.
+  pipeline.sh runs this step once per pipeline invocation, so a retry
+  means re-running the pipeline, not just this step; check the registry
+  first.
 - Stdout carries aggregates only (gaps, streak, flag). Per-sample
   outputs stay in data/run/; no sample ids, no account-shaped data.
 
@@ -72,7 +79,7 @@ import math
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import evaluate
 
@@ -87,7 +94,7 @@ class GapError(Exception):
     """Input error: the script refuses to compute rather than guess."""
 
 
-def _fail(msg: str) -> Any:
+def _fail(msg: str) -> NoReturn:
     raise GapError(msg)
 
 
@@ -117,7 +124,7 @@ def _iou_threshold(value: Any) -> float:
         or not math.isfinite(value)
         or not 0.0 < value <= 1.0
     ):
-        _fail(f"iou_threshold must be a number in (0, 1]")
+        _fail("iou_threshold must be a number in (0, 1]")
     return float(value)
 
 
@@ -126,8 +133,11 @@ def _val_predictions(
 ) -> dict[str, list[tuple[int, int, frozenset[str]]]]:
     """metrics.json val_segments as evaluate.py predictions.
 
-    Decoded exactly as predict.py decodes them: a segment's `name` splits
-    on "+" into names (a combo label is its names, not one name).
+    Decoded by evaluate.parse_segment, the same decoder the holdout
+    path uses: a segment's `name` splits on "+" into names (a combo
+    label is its names, not one name), empty name components fail, and
+    a contradictory is_combo flag fails — instead of the loose local
+    decoding this used to carry.
     """
     if not isinstance(val_segments, list):
         _fail("metrics val_segments must be a list")
@@ -142,19 +152,7 @@ def _val_predictions(
         sid = seg.get("sample_id")
         if sid not in val_set:
             _fail(f"{where} sample_id {sid!r} is not in the val split")
-        start, end = seg.get("start_frame"), seg.get("end_frame")
-        if (
-            not isinstance(start, int)
-            or not isinstance(end, int)
-            or isinstance(start, bool)
-            or isinstance(end, bool)
-            or not 0 <= start < end
-        ):
-            _fail(f"{where} needs 0 <= start_frame < end_frame")
-        name = seg.get("name")
-        if not isinstance(name, str) or not name:
-            _fail(f"{where} needs a non-empty name")
-        pred[sid].append((start, end, frozenset(name.split("+"))))
+        pred[sid].append(evaluate.parse_segment(seg, where))
     return pred
 
 
@@ -199,19 +197,50 @@ def _over_threshold(gaps: dict[str, float]) -> bool:
     )
 
 
+def _gap_value(gaps: dict[str, Any], key: str, where: str) -> float:
+    """A recorded gap value, validated — never silently defaulted.
+
+    Gaps are differences of [0, 1] metrics, so they live in [-1, 1].
+    A missing key or a non-numeric value is a malformed registry, not a
+    zero gap: failing closed (exit 2) beats silently resetting the
+    streak on a corrupt log.
+    """
+    value = gaps.get(key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not -1.0 <= value <= 1.0
+    ):
+        _fail(f"{where} gap {key!r} must be a number in [-1, 1], got {value!r}")
+    return float(value)
+
+
 def replay_streak(records: list[Any]) -> int:
-    """Streak over prior leakage_gap records, in log order."""
+    """Streak over prior leakage_gap records, in log order.
+
+    A promoted record's gaps are validated on replay: a non-numeric or
+    missing gap fails closed (GapError -> exit 2) instead of raising
+    TypeError or silently reading as 0.
+    """
     streak = 0
-    for rec in records:
+    for i, rec in enumerate(records):
         if not isinstance(rec, dict) or rec.get("kind") != "leakage_gap":
             continue
         promotion = rec.get("promotion")
         gaps = rec.get("val_minus_holdout")
         if promotion == "bootstrap":
             continue
-        if promotion == "promote" and isinstance(gaps, dict):
-            over = abs(gaps.get("promotion_metric", 0)) > GAP_THRESHOLD or (
-                abs(gaps.get("segment_f1", 0)) > GAP_THRESHOLD
+        if promotion == "promote":
+            if not isinstance(gaps, dict):
+                _fail(f"registry record #{i} has no val_minus_holdout dict")
+            where = f"registry record #{i}"
+            # Validate both before comparing: `or` would short-circuit
+            # past the second validation when the first gap is over.
+            promotion_gap = _gap_value(gaps, "promotion_metric", where)
+            segment_gap = _gap_value(gaps, "segment_f1", where)
+            over = (
+                abs(promotion_gap) > GAP_THRESHOLD or abs(segment_gap) > GAP_THRESHOLD
             )
             streak = streak + 1 if over else 0
         else:
