@@ -41,6 +41,8 @@ class PipelineConfigsTest(unittest.TestCase):
             "learning_rate",
             "epochs",
             "l2",
+            "class_balance_exponent",
+            "background_ratio",
         ):
             self.assertEqual(pipeline[key], full[key], key)
 

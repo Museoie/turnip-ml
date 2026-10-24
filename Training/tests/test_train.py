@@ -237,6 +237,131 @@ class TrainTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             train.build_dataset(np, [sample], 8, 8)
 
+    # -- class-balance sampling (turnip-ml#38, TRAINING_DESIGN.md §2.7) ----
+
+    def test_class_balance_weights_match_formula(self) -> None:
+        # 100:1 name skew, weight ∝ 1/√count: the rare window weighs 10x
+        # the frequent one per window.
+        labels = ["gainer"] * 3 + ["backflip", "background"]
+        weights, is_bg = train.window_sampling_weights(
+            labels, {"gainer": 100, "backflip": 1}, 0.5
+        )
+        self.assertEqual(list(weights[:3]), [0.1, 0.1, 0.1])
+        self.assertEqual(weights[3], 1.0)
+        self.assertEqual(weights[4], 0.0)
+        self.assertEqual(list(is_bg), [False, False, False, False, True])
+
+    def test_combo_window_takes_rarest_name_weight(self) -> None:
+        weights, _ = train.window_sampling_weights(
+            ["corkscrew+gainer"], {"corkscrew": 100, "gainer": 1}, 0.5
+        )
+        self.assertEqual(weights[0], 1.0)  # gainer's, not corkscrew's
+
+    def test_window_label_with_unknown_name_fails_closed(self) -> None:
+        with self.assertRaises(ValueError):
+            train.window_sampling_weights(["gainer"], {"corkscrew": 5}, 0.5)
+
+    def test_background_sampled_separately_from_name_weights(self) -> None:
+        # Background windows never enter the name-weight stream, and their
+        # count is the ratio's alone: name weights can't move it.
+        name_idx = np.arange(10, dtype=np.int64)
+        bg_idx = np.arange(10, 15, dtype=np.int64)
+        samplers = [
+            train.make_epoch_sampler(name_idx, np.ones(10), bg_idx, 0.25),
+            train.make_epoch_sampler(
+                name_idx, np.array([1.0] + [0.01] * 9), bg_idx, 0.25
+            ),
+        ]
+        n_bg = train.background_windows_per_epoch(10, 0.25)
+        self.assertEqual(n_bg, 3)  # round(0.25 / 0.75 * 10)
+        for i, sampler in enumerate(samplers):
+            idx = sampler(np.random.default_rng(7))
+            self.assertEqual(len(idx), 13, i)
+            self.assertEqual(int((idx >= 10).sum()), n_bg, i)
+
+    def test_background_ratio_zero_samples_no_background(self) -> None:
+        sampler = train.make_epoch_sampler(
+            np.arange(4, dtype=np.int64),
+            np.ones(4),
+            np.empty(0, dtype=np.int64),
+            0.0,
+        )
+        idx = sampler(np.random.default_rng(1))
+        self.assertEqual(len(idx), 4)
+        self.assertTrue((idx < 4).all())
+
+    def test_background_ratio_with_no_background_windows_fails_closed(self) -> None:
+        with self.assertRaises(ValueError):
+            train.make_epoch_sampler(
+                np.arange(4, dtype=np.int64),
+                np.ones(4),
+                np.empty(0, dtype=np.int64),
+                0.25,
+            )
+
+    def test_epoch_sampling_is_seed_deterministic(self) -> None:
+        sampler = train.make_epoch_sampler(
+            np.arange(6, dtype=np.int64),
+            np.ones(6),
+            np.arange(6, 9, dtype=np.int64),
+            0.25,
+        )
+        a = sampler(np.random.default_rng(42))
+        b = sampler(np.random.default_rng(42))
+        self.assertTrue(np.array_equal(a, b))
+        c = sampler(np.random.default_rng(43))
+        self.assertFalse(np.array_equal(a, c))
+
+    def test_skewed_names_upsample_per_formula(self) -> None:
+        # 100:1 name skew, weight ∝ 1/√count: the rare window is drawn ~10x
+        # as often per window as a frequent one (seed-deterministic).
+        name_idx = np.arange(101, dtype=np.int64)  # idx 0 = the rare window
+        labels = ["rare"] + ["frequent"] * 100
+        weights, _ = train.window_sampling_weights(
+            labels, {"frequent": 100, "rare": 1}, 0.5
+        )
+        sampler = train.make_epoch_sampler(
+            name_idx, weights, np.empty(0, dtype=np.int64), 0.0
+        )
+        rng = np.random.default_rng(1234)
+        rare_draws = 0
+        freq_draws = 0
+        for _ in range(300):
+            idx = sampler(rng)
+            rare_draws += int((idx == 0).sum())
+            freq_draws += int((idx != 0).sum())
+        ratio = (rare_draws / 1) / (freq_draws / 100)
+        self.assertGreater(ratio, 8.0)
+        self.assertLess(ratio, 12.0)
+
+    def test_metrics_records_sampling_weights(self) -> None:
+        self.assertEqual(self._run(), 0)
+        m = self._metrics()
+        s = m["sampling"]
+        self.assertEqual(s["class_balance_exponent"], 0.5)
+        self.assertEqual(s["background_ratio"], 0.2)
+        counts = m["train_name_counts"]
+        self.assertEqual(list(s["window_weight_per_name"]), sorted(counts))
+        want = {name: counts[name] ** -0.5 for name in counts}
+        self.assertEqual(s["window_weight_per_name"], want)
+        self.assertEqual(
+            s["n_background_windows_per_epoch"],
+            train.background_windows_per_epoch(s["n_name_windows_per_epoch"], 0.2),
+        )
+        # The smoke train split really does have both streams.
+        self.assertGreater(s["n_name_windows_per_epoch"], 0)
+        self.assertGreater(s["n_background_windows_per_epoch"], 0)
+
+    def test_negative_class_balance_exponent_fails_closed(self) -> None:
+        p = self._rewrite_config(
+            "class_balance_exponent = 0.5", "class_balance_exponent = -0.5"
+        )
+        self.assertEqual(self._run(config=p), 2)
+
+    def test_background_ratio_must_be_below_one(self) -> None:
+        p = self._rewrite_config("background_ratio = 0.2", "background_ratio = 1.0")
+        self.assertEqual(self._run(config=p), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

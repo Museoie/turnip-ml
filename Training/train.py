@@ -22,7 +22,8 @@ Artifacts in the out dir:
   config.toml   byte-exact snapshot of the effective config
   model.npz     weights (W, b), class list, feature stats, window params
   metrics.json  sorted-key metrics incl. val accuracy, decoded segments,
-                per-name train counts and the split's sha256
+                per-name train counts, the split's sha256, and the
+                class-balance sampling record (§2.7)
 
 Sample JSON format (one file per sample in samples_dir):
   {"sample_id": ..., "fps": 10,
@@ -49,6 +50,7 @@ import sys
 import types
 import zipfile
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +81,8 @@ CONFIG_SCHEMA: dict[str, type | tuple[type, ...]] = {
     "learning_rate": (float, int),
     "epochs": int,
     "l2": (float, int),
+    "class_balance_exponent": (float, int),
+    "background_ratio": (float, int),
     "init_checkpoint": str,
 }
 
@@ -120,6 +124,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("learning_rate must be positive")
     if not cfg["l2"] >= 0:
         raise ValueError("l2 must be non-negative")
+    if not cfg["class_balance_exponent"] >= 0:
+        raise ValueError("class_balance_exponent must be non-negative")
+    if not 0 <= cfg["background_ratio"] < 1:
+        raise ValueError("background_ratio must be in [0, 1)")
     return cfg
 
 
@@ -353,7 +361,90 @@ def decode_segments(
 
 
 # ---------------------------------------------------------------------------
-# Model: softmax linear classifier, full-batch gradient descent
+# Class-balance sampling (TRAINING_DESIGN.md §2.7, §2.5)
+# ---------------------------------------------------------------------------
+
+
+def window_sampling_weights(
+    labels: list[str], name_counts: dict[str, int], exponent: float
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+    """Per-window class-balance weights.
+
+    Each labeled window weighs ``count ** -exponent`` for its rarest name —
+    a combo window takes the weight of its rarest name — so frequent names
+    don't drown the rest while rare names aren't repeated into
+    memorization. The counts are the run's train-split counts (the
+    ``train_count`` published per name in ``name_metrics``). Background
+    windows get weight 0 here: they are sampled separately with their own
+    ratio (§2.5), not by the name weights. Returns (weights, is_background).
+    """
+    weights = np.empty(len(labels), dtype=np.float64)
+    is_bg = np.zeros(len(labels), dtype=bool)
+    for i, label in enumerate(labels):
+        if label == BACKGROUND:
+            is_bg[i] = True
+            weights[i] = 0.0
+            continue
+        names = set(label.split("+"))
+        missing = sorted(names - set(name_counts))
+        if missing:
+            raise ValueError(
+                f"window label {label!r} names names missing from the "
+                f"train-split counts: {missing}"
+            )
+        rarest = min(name_counts[name] for name in names)
+        weights[i] = rarest ** (-exponent)
+    return weights, is_bg
+
+
+def background_windows_per_epoch(n_name_windows: int, background_ratio: float) -> int:
+    """Background windows per epoch, so the epoch sample lands at
+    ~``background_ratio`` background (TRAINING_DESIGN.md §2.5)."""
+    if background_ratio <= 0:
+        return 0
+    return round(background_ratio * n_name_windows / (1 - background_ratio))
+
+
+def make_epoch_sampler(
+    name_idx: npt.NDArray[np.int64],
+    name_weights: npt.NDArray[np.float64],
+    bg_idx: npt.NDArray[np.int64],
+    background_ratio: float,
+) -> Callable[[np.random.Generator], npt.NDArray[np.int64]]:
+    """One epoch's window sample, deterministic given the rng.
+
+    Name windows are drawn with replacement ∝ the §2.7 class-balance
+    weights (the whole name set is redrawn each epoch, so rare names are
+    upsampled, never subsampled); background windows are drawn uniformly
+    with replacement to their own count (§2.5), unchanged by the name
+    weights. The two draws are shuffled together so the epoch isn't
+    name-then-background.
+    """
+    if len(name_idx) == 0:
+        raise ValueError("no labeled windows to sample — refusing to train")
+    probs = name_weights / name_weights.sum()
+    n_bg = background_windows_per_epoch(len(name_idx), background_ratio)
+    if n_bg > 0 and len(bg_idx) == 0:
+        raise ValueError(
+            "background_ratio > 0 but no background windows in the train "
+            "split — refusing to train"
+        )
+
+    def sample_epoch(rng: np.random.Generator) -> npt.NDArray[np.int64]:
+        name_draws = rng.choice(name_idx, size=len(name_idx), replace=True, p=probs)
+        if n_bg:
+            bg_draws = rng.choice(bg_idx, size=n_bg, replace=True)
+            idx = np.concatenate([name_draws, bg_draws])
+        else:
+            idx = np.asarray(name_draws)
+        rng.shuffle(idx)
+        return idx.astype(np.int64)
+
+    return sample_epoch
+
+
+# ---------------------------------------------------------------------------
+# Model: softmax linear classifier, gradient descent on resampled epochs
 # ---------------------------------------------------------------------------
 
 
@@ -375,11 +466,16 @@ def train_classifier(
     l2: float,
     seed: int,
     init: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None = None,
+    epoch_sampler: Callable[[np.random.Generator], npt.NDArray[np.int64]] | None = None,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float, float]:
-    """Full-batch GD on softmax cross-entropy + L2. Returns (W, b, l0, l1).
+    """Gradient descent on softmax cross-entropy + L2. Returns (W, b, l0, l1).
 
     init=(W, b) continues from a checkpoint (fine-tune the champion);
-    otherwise weights are seeded from scratch.
+    otherwise weights are seeded from scratch. epoch_sampler, when given,
+    redraws the training windows every epoch (TRAINING_DESIGN.md §2.7
+    class-balance sampling); None trains on every window, every epoch.
+    l0/l1 are reported on the full train set either way, so runs stay
+    comparable across sampler settings.
     """
     n, d = X.shape
     rng = np.random.default_rng(seed)
@@ -391,26 +487,31 @@ def train_classifier(
     W = xp.asarray(W)
     b = xp.asarray(b)
 
-    def loss_and_grad() -> tuple[
-        float, npt.NDArray[np.float64], npt.NDArray[np.float64]
-    ]:
-        logits = X @ W + b
+    def loss_and_grad(
+        Xb: npt.NDArray[np.float64], yb: npt.NDArray[np.int64], nb: int
+    ) -> tuple[float, npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        logits = Xb @ W + b
         probs = _softmax(xp, logits)
-        nll = -xp.log(probs[xp.arange(n), y] + 1e-12).mean()
+        nll = -xp.log(probs[xp.arange(nb), yb] + 1e-12).mean()
         reg = 0.5 * l2 * float(xp.sum(W * W))
         dlogits = probs
-        dlogits[xp.arange(n), y] -= 1
-        dlogits /= n
-        dW = X.T @ dlogits + l2 * W
+        dlogits[xp.arange(nb), yb] -= 1
+        dlogits /= nb
+        dW = Xb.T @ dlogits + l2 * W
         db = dlogits.sum(axis=0)
         return float(nll + reg), dW, db
 
-    l0, _, _ = loss_and_grad()
+    l0, _, _ = loss_and_grad(X, y, n)
     for _ in range(epochs):
-        _, dW, db = loss_and_grad()
+        if epoch_sampler is not None:
+            idx = epoch_sampler(rng)
+            Xb, yb = X[idx], y[idx]
+        else:
+            Xb, yb = X, y
+        _, dW, db = loss_and_grad(Xb, yb, Xb.shape[0])
         W -= learning_rate * dW
         b -= learning_rate * db
-    l1, _, _ = loss_and_grad()
+    l1, _, _ = loss_and_grad(X, y, n)
     return np.asarray(W), np.asarray(b), l0, l1
 
 
@@ -497,6 +598,19 @@ def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
     ytr = np.array([cls_index[c] for c in ytr_labels], dtype=np.int64)
     yva = np.array([cls_index[c] for c in yva_labels], dtype=np.int64)
 
+    # Class-balance sampling (TRAINING_DESIGN.md §2.7): each epoch redraws
+    # its windows — name windows ∝ count**-exponent (combo = rarest name),
+    # background windows separately at background_ratio (§2.5).
+    exponent = float(cfg["class_balance_exponent"])
+    background_ratio = float(cfg["background_ratio"])
+    tr_weights, tr_is_bg = window_sampling_weights(ytr_labels, name_counts, exponent)
+    name_idx = np.flatnonzero(~tr_is_bg).astype(np.int64)
+    bg_idx = np.flatnonzero(tr_is_bg).astype(np.int64)
+    epoch_sampler = make_epoch_sampler(
+        name_idx, tr_weights[~tr_is_bg], bg_idx, background_ratio
+    )
+    n_bg_per_epoch = background_windows_per_epoch(len(name_idx), background_ratio)
+
     init = None
     if cfg["init_checkpoint"]:
         ckpt = load_checkpoint(resolve(cfg["init_checkpoint"]))
@@ -528,6 +642,7 @@ def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
         float(cfg["l2"]),
         cfg["seed"],
         init,
+        epoch_sampler,
     )
 
     va_pred_idx = predict(xp, xp.asarray(Xva), Wm, bm)
@@ -570,6 +685,18 @@ def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
         "init_checkpoint": cfg["init_checkpoint"] or None,
         "split_sha256": split_sha,
         "train_name_counts": name_counts,
+        # The effective sampling scheme, for reproducibility: the per-name
+        # counts it read (train_count, §6.1) and the per-name window weights
+        # derived from them (count**-exponent, combo = rarest name).
+        "sampling": {
+            "class_balance_exponent": exponent,
+            "background_ratio": background_ratio,
+            "window_weight_per_name": {
+                name: name_counts[name] ** (-exponent) for name in sorted(name_counts)
+            },
+            "n_name_windows_per_epoch": len(name_idx),
+            "n_background_windows_per_epoch": n_bg_per_epoch,
+        },
     }
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=2, sort_keys=True)

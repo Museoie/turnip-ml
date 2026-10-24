@@ -116,18 +116,28 @@ python Training/train.py --config Training/config/smoke.toml
   `evaluate.ground_truth_segments` (one per distinct window, with every
   name labeled on it), the same ground truth the holdout evaluation
   scores against.
+- **Class balance.** Each epoch's windows are resampled, not reused whole:
+  name windows are drawn with replacement ∝
+  `train_count**-class_balance_exponent` per canonical name — a combo
+  window takes its rarest name's weight — so a frequent name doesn't drown
+  the rest while a rare name isn't repeated into memorization; background
+  windows are sampled separately at `background_ratio` of the epoch
+  sample (`docs/TRAINING_DESIGN.md` §2.7, §2.5). The scheme, the per-name
+  counts it read, and the effective per-name weights land in
+  `metrics.json` under `sampling` for reproducibility.
 - **Model (smoke).** Softmax linear classifier over per-joint mean position
-  + mean speed, trained with full-batch gradient descent (seeded). The
-  architecture is deliberately tiny: the smoke test proves the pipeline
-  end-to-end, not the model. `Training/README.md` "Full run" covers the
-  real architecture seam.
+  + mean speed, trained with gradient descent on class-balanced epoch
+  samples (seeded). The architecture is deliberately tiny: the smoke test
+  proves the pipeline end-to-end, not the model. `Training/README.md`
+  "Full run" covers the real architecture seam.
 - **Fine-tuning.** Set `init_checkpoint` to a previous run's `model.npz`
   to continue training the champion instead of starting from scratch;
   class list and window params must match or it fails closed.
 - **Artifacts.** The out dir gets `config.toml` (byte-exact snapshot of the
   effective config), `model.npz` (weights, class list, feature stats,
   window params), and `metrics.json` (sorted keys: seed, losses, val
-  accuracy overall + per class, decoded val segments, config sha256).
+  accuracy overall + per class, decoded val segments, config sha256, the
+  class-balance sampling record).
   Re-running the same config + data yields byte-identical `metrics.json`.
 
 The CI smoke test (`.github/workflows/training-smoke.yml`) runs the script
