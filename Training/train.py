@@ -170,7 +170,7 @@ def load_split(path: Path) -> dict[str, str]:
     return {str(sid): str(s) for sid, s in split.items()}
 
 
-def _check_keypoints(kps: Any, sample_id: str) -> npt.NDArray[np.float64]:
+def check_keypoints(kps: Any, sample_id: str) -> npt.NDArray[np.float64]:
     arr = np.asarray(kps, dtype=np.float64)
     if arr.ndim != 3 or arr.shape[1] != N_KEYPOINTS or arr.shape[2] != 3:
         raise ValueError(
@@ -210,7 +210,7 @@ def load_samples(
                 f"sample {sid!r} has no entry in the split — every sample "
                 "must be assigned train/val/holdout (see split_dataset.py)"
             )
-        rec["keypoints"] = _check_keypoints(rec.get("keypoints"), sid)
+        rec["keypoints"] = check_keypoints(rec.get("keypoints"), sid)
         tricks = rec.get("tricks", [])
         if not isinstance(tricks, list):
             raise TypeError(f"sample {sid!r}: tricks must be a list")

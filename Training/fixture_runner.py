@@ -309,7 +309,7 @@ def load_pose(poses_dir: Path, fixture: Fixture) -> npt.NDArray[np.float64]:
         _fail(f"{where}: {path} does not match its pose_sha256")
     try:
         pose = tkp1.decode_gz(data)
-        keypoints = train._check_keypoints(pose.keypoints, fixture.id)
+        keypoints = train.check_keypoints(pose.keypoints, fixture.id)
     except ValueError as e:  # Tkp1Error is a ValueError
         _fail(f"{where}: undecodable pose blob {path.name}: {e}")
     for start, end, _ in fixture.segments:
