@@ -63,7 +63,7 @@ def load_split_samples(
             raise ValueError(f"cannot read sample {path}: {e}") from e
         if not isinstance(rec, dict) or rec.get("sample_id") != sid:
             raise ValueError(f"sample file {path} does not hold sample {sid!r}")
-        keypoints = train._check_keypoints(rec.get("keypoints"), sid)
+        keypoints = train.check_keypoints(rec.get("keypoints"), sid)
         samples.append({"sample_id": sid, "keypoints": keypoints, "tricks": []})
     return samples
 

@@ -199,13 +199,13 @@ def build_request(run: Path, dataset: Path) -> dict[str, Any]:
     try:
         if not isinstance(metrics, dict) or not isinstance(manifest, dict):
             raise TypeError("metrics.json and dataset_manifest.json must be objects")
-        val_accuracy = name_metrics._unit(
+        val_accuracy = name_metrics.check_unit(
             metrics.get("val_accuracy"), "metrics.json val_accuracy"
         )
-        n_val = name_metrics._count(
+        n_val = name_metrics.check_count(
             metrics.get("n_val_windows"), "metrics.json n_val_windows"
         )
-        taxonomy_version = name_metrics._count(
+        taxonomy_version = name_metrics.check_count(
             manifest.get("taxonomy_version"), "dataset_manifest.json taxonomy_version"
         )
         if taxonomy_version < 1:
