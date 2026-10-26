@@ -154,7 +154,7 @@ class FakeFarm:
                 "version": current,
                 "sha256": "0" * 64,
                 "r2_key": f"models/{current}.mlpackage.zip",
-                "holdout_report_r2_key": f"models/{current}.holdout_report.json",
+                "holdout_report_r2_key": f"reports/{current}-holdout.json",
                 "promoted_at": "2026-10-01T03:40:00.000Z",
             }
         self.published = set(published) | ({current} if current else set())
@@ -335,7 +335,7 @@ class PublishRoundTripTest(PublishTestCase):
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
 
         artifact = self.r2.objects["models/trick-v1.0.mlpackage.zip"]
-        report = self.r2.objects["models/trick-v1.0.holdout_report.json"]
+        report = self.r2.objects["reports/trick-v1.0-holdout.json"]
         self.assertEqual(artifact, EXPORT(self.challenger / "model.npz"))
         self.assertEqual(report, (self.challenger / "holdout_report.json").read_bytes())
         self.assertEqual(
@@ -349,7 +349,7 @@ class PublishRoundTripTest(PublishTestCase):
         self.assertEqual(body["sha256"], hashlib.sha256(artifact).hexdigest())
         self.assertEqual(body["byte_size"], len(artifact))
         self.assertEqual(
-            body["holdout_report_r2_key"], "models/trick-v1.0.holdout_report.json"
+            body["holdout_report_r2_key"], "reports/trick-v1.0-holdout.json"
         )
         self.assertEqual(body["training_source_ids"], self.fixture.train_ids)
         self.assertEqual(
@@ -359,6 +359,11 @@ class PublishRoundTripTest(PublishTestCase):
         ckpt = export_coreml.load_model(self.challenger / "model.npz")
         self.assertEqual(
             (body["input_desc"], body["output_desc"]), export_coreml.descriptors(ckpt)
+        )
+        # The farm stores output_desc as given: the client's personal layer
+        # finds the embedding output there (MODEL_CONTRACT.md §3.2.2).
+        self.assertEqual(
+            body["output_desc"]["embedding"]["output_name"], "window_embeddings"
         )
         self.assertEqual(set(body["val_metrics"]), {"val_accuracy", "n_val_windows"})
         # Unset optional fields are omitted, never sent as null.

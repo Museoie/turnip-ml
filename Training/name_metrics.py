@@ -61,13 +61,13 @@ import evaluate
 MIN_HOLDOUT_COUNT = 5
 
 
-def _count(value: Any, where: str) -> int:
+def check_count(value: Any, where: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{where} must be a non-negative integer")
     return value
 
 
-def _unit(value: Any, where: str) -> float:
+def check_unit(value: Any, where: str) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
@@ -88,10 +88,10 @@ def holdout_per_name(report: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(name, str) or not name or not isinstance(entry, dict):
             raise ValueError(f"{where} must be an object under a non-empty name")
         per_name[name] = {
-            "support": _count(entry.get("support"), f"{where} support"),
-            "predicted": _count(entry.get("predicted"), f"{where} predicted"),
-            "precision": _unit(entry.get("precision"), f"{where} precision"),
-            "recall": _unit(entry.get("recall"), f"{where} recall"),
+            "support": check_count(entry.get("support"), f"{where} support"),
+            "predicted": check_count(entry.get("predicted"), f"{where} predicted"),
+            "precision": check_unit(entry.get("precision"), f"{where} precision"),
+            "recall": check_unit(entry.get("recall"), f"{where} recall"),
         }
     return per_name
 
@@ -104,7 +104,7 @@ def train_counts(metrics: Any) -> dict[str, int]:
     for i, (name, count) in enumerate(sorted(counts.items())):
         if not isinstance(name, str) or not name:
             raise ValueError(f"metrics.json train_name_counts entry #{i}: no name")
-        _count(count, f"metrics.json train_name_counts entry #{i}")
+        check_count(count, f"metrics.json train_name_counts entry #{i}")
     return counts
 
 
@@ -143,11 +143,11 @@ def validate(data: Any) -> dict[str, dict[str, Any]]:
         where = f"name_metrics entry #{i}"
         if not name or not isinstance(entry, dict) or set(entry) != ENTRY_KEYS:
             raise ValueError(f"{where} needs exactly {sorted(ENTRY_KEYS)}")
-        _count(entry["holdout_count"], f"{where} holdout_count")
-        _count(entry["train_count"], f"{where} train_count")
+        check_count(entry["holdout_count"], f"{where} holdout_count")
+        check_count(entry["train_count"], f"{where} train_count")
         for key in ("precision", "recall"):
             if entry[key] is not None:
-                _unit(entry[key], f"{where} {key}")
+                check_unit(entry[key], f"{where} {key}")
     return data
 
 
