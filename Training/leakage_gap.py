@@ -11,24 +11,45 @@ consecutive promoted runs flags the split-grouping question.
 Inputs
 ------
 --metrics      metrics.json from Training/train.py (val_accuracy,
-               val_segments, split_sha256).
+               val_segments, classes, split_sha256).
+--model        model.npz from the same train.py run: the holdout side of
+               the promotion-metric gap is computed with it.
 --report       holdout_report.json from Training/evaluate.py (f1,
-               name_accuracy_given_detection, iou_threshold,
-               inputs.split_sha256).
---split        split.json both were computed on. Checked against both
-               SHAs, like name_metrics.py, so the gap always describes
-               one run.
---samples-dir  sample JSON dir (val ground truth).
+               iou_threshold, inputs.split_sha256 and
+               inputs.predictions_sha256).
+--split        split.json all three were computed on. Checked against
+               both SHAs, like name_metrics.py, so the gap always
+               describes one run.
+--samples-dir  sample JSON dir (val and holdout ground truth, holdout
+               keypoints).
 --registry     decision log (JSON array; default Training/registry.json).
                Gap records are appended; the log is what the nightly
                trigger reads, so the streak survives fresh checkouts
                via R2.
 --promotion    this run's promotion decision: promote | archive |
                bootstrap | not-run.
+TRAINING_RUN_ID (environment, optional) names the run in its registry
+               record, as publish_model.py names it to the farm; see
+               "Run id" below.
 
 What it computes
 ----------------
-- promotion_metric gap: val_accuracy − holdout name_accuracy_given_detection.
+Each gap compares one metric, computed the same way on both splits.
+
+- promotion_metric gap: val_accuracy − holdout window accuracy.
+  val_accuracy is what the promotion gate reads (promote.py's default
+  --metric): train.py's window-level argmax accuracy over every val
+  window, "background" windows included. The holdout side is that same
+  computation over every holdout window: the model's windowing
+  (train.build_dataset at its window_frames/window_stride), labels from
+  train.label_for_window over evaluate.ground_truth_segments, the
+  checkpoint's feature standardization, and train.predict's argmax.
+  The holdout report's name_accuracy_given_detection is a segment-level
+  metric (names matched among IoU-matched detections), so it is not
+  this gap's holdout side. A holdout window whose label train never saw
+  can't be predicted and counts as a miss (train.py refuses such labels
+  on val, so val has none); the record counts those windows. No holdout
+  window at all fails closed: the accuracy would be undefined.
 - segment_f1 gap: val segment F1 − holdout f1. Val F1 is computed on the
   same footing as holdout F1: metrics.json's val_segments decoded by
   evaluate.parse_segment (a combo label is its names, not one name),
@@ -42,28 +63,39 @@ What it computes
   move the streak either way.
 - flagged: streak >= 3.
 
+Run id
+------
+Every registry record carries a run_id, and the streak counts runs, not
+records. The run id is TRAINING_RUN_ID when set (the workflow passes
+"<run_id>-<run_attempt>"), else "sha256:" + a hash of the run's inputs
+and results (split, metrics.json, holdout predictions, promotion, gaps),
+so a local re-run of the same run gets the same id.
+
+The report write and the registry append are separately atomic, not
+jointly so, so a step can be re-run after its registry append. A re-run
+is idempotent: when the registry already holds a record for this run id
+with the same promotion and gaps, the report is written with that
+record's streak and the registry is left as it is. A record for this run
+id with different results fails closed: one run id names one run. A gap
+record with no run_id, or two with the same one, is a malformed registry.
+
 Outputs
 -------
-- The report gains "val_minus_holdout": both gaps, the four inputs, the
-  streak, and the flag (same format evaluate.py writes: indent 2, sorted
-  keys, trailing newline).
-- A {"kind": "leakage_gap", ...} record is appended to the registry
-  (atomic write, like promote.py). Other record kinds in the log are
-  ignored when replaying the streak.
-- The report write and the registry append are separately atomic, not
-  jointly so, and records carry no run id: the streak replay counts
-  records, not runs. Retry rule: never re-run this step for a run whose
-  record is already in the registry — a retry after a registry append
-  appends a second record for the same run and inflates the streak.
-  pipeline.sh runs this step once per pipeline invocation, so a retry
-  means re-running the pipeline, not just this step; check the registry
-  first.
+- The report gains "val_minus_holdout": both gaps, their inputs, the
+  holdout window counts, the streak, and the flag (same format
+  evaluate.py writes: indent 2, sorted keys, trailing newline). The run
+  id stays out of the report, so its bytes depend on the data alone.
+- A {"kind": "leakage_gap", "run_id": ..., ...} record is appended to the
+  registry (atomic write, like promote.py). Other record kinds in the
+  log are ignored when replaying the streak.
 - Stdout carries aggregates only (gaps, streak, flag). Per-sample
   outputs stay in data/run/; no sample ids, no account-shaped data.
 
 Exit codes: 0 = written, 2 = input error (fail closed): unreadable or
-malformed inputs, split mismatch, a val_segments entry outside the val
-split, or a malformed existing registry.
+malformed inputs, split mismatch, a model whose classes differ from the
+metrics', no holdout window, a val_segments entry outside the val
+split, a malformed existing registry, or a run id already recorded with
+different results.
 
 Determinism: same inputs -> byte-identical report and registry payload
 (sorted keys, floats rounded to 6 decimals), except the registry
@@ -74,18 +106,23 @@ reproducible artifact).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
 import evaluate
+import numpy as np
+import train
 
 GAP_THRESHOLD = 0.05
 FLAG_STREAK = 3
 PROMOTIONS = ("promote", "archive", "bootstrap", "not-run")
+RUN_ID_ENV = "TRAINING_RUN_ID"
 EXIT_OK = 0
 EXIT_ERROR = 2
 
@@ -156,9 +193,67 @@ def _val_predictions(
     return pred
 
 
+def load_split_samples(
+    split: dict[str, Any], samples_dir: Path, split_name: str
+) -> list[dict[str, Any]]:
+    """The named split's samples: keypoints and ground-truth tricks.
+
+    train.load_samples never returns holdout samples (its poisoning
+    defense) and predict.load_split_samples drops the tricks, so this
+    reads them itself, with the same checks: each file holds its sample,
+    keypoints pass train.check_keypoints, and tricks is a list
+    (train.build_dataset validates each entry when it labels windows).
+    """
+    ids = sorted(sid for sid, part in split.items() if part == split_name)
+    if not ids:
+        _fail(f"no {split_name} samples in the split: window accuracy is undefined")
+    samples = []
+    for sid in ids:
+        path = samples_dir / f"{sid}.json"
+        rec = _load_json(path)
+        if not isinstance(rec, dict) or rec.get("sample_id") != sid:
+            _fail(f"sample file {path} does not hold sample {sid!r}")
+        tricks = rec.get("tricks")
+        if not isinstance(tricks, list):
+            _fail(f"{path}: missing 'tricks' list")
+        keypoints = train.check_keypoints(rec.get("keypoints"), sid)
+        samples.append({"sample_id": sid, "keypoints": keypoints, "tricks": tricks})
+    return samples
+
+
+def window_accuracy(
+    ckpt: dict[str, Any], samples: list[dict[str, Any]]
+) -> tuple[float, int, int]:
+    """The checkpoint's window-level accuracy over `samples`, computed as
+    train.py computes val_accuracy: (accuracy, windows, windows whose
+    label is not one of the model's classes).
+
+    Same windowing and labels (train.build_dataset, label_for_window),
+    same standardization (the checkpoint's feature stats, which train.py
+    applied to val before saving them), same argmax (train.predict), and
+    the fraction of windows whose predicted label equals the true one.
+    """
+    window_frames = int(ckpt["window_frames"])
+    window_stride = int(ckpt["window_stride"])
+    classes = [str(c) for c in ckpt["classes"]]
+    windowed = [s for s in samples if s["keypoints"].shape[0] >= window_frames]
+    if not windowed:
+        _fail(
+            f"no windows: every sample is shorter than the model's "
+            f"window_frames ({window_frames}), so window accuracy is undefined"
+        )
+    X_raw, labels, _ = train.build_dataset(np, windowed, window_frames, window_stride)
+    X = (np.asarray(X_raw) - ckpt["feat_mean"]) / ckpt["feat_std"]
+    pred = [classes[i] for i in train.predict(np, X, ckpt["W"], ckpt["b"])]
+    hits = np.array([p == y for p, y in zip(pred, labels, strict=True)])
+    known = set(classes)
+    unseen = sum(1 for y in labels if y not in known)
+    return float(np.mean(hits)), len(labels), unseen
+
+
 def compute_gaps(
-    metrics: Any, report: Any, split: Any, samples_dir: Path
-) -> dict[str, float]:
+    metrics: Any, report: Any, split: Any, samples_dir: Path, ckpt: dict[str, Any]
+) -> dict[str, Any]:
     """Both val-minus-holdout gaps plus their inputs, rounded to 6."""
     if not isinstance(metrics, dict):
         _fail("metrics must be a JSON object")
@@ -167,12 +262,13 @@ def compute_gaps(
     if not isinstance(split, dict):
         _fail("split must be a JSON object of sample_id -> split")
     val_accuracy = _unit(metrics.get("val_accuracy"), "metrics val_accuracy")
-    holdout_acc = _unit(
-        report.get("name_accuracy_given_detection"),
-        "report name_accuracy_given_detection",
-    )
     holdout_f1 = _unit(report.get("f1"), "report f1")
     iou = _iou_threshold(report.get("iou_threshold"))
+    if metrics.get("classes") != [str(c) for c in ckpt["classes"]]:
+        _fail("model classes do not match metrics classes: not the same train.py run")
+
+    holdout = load_split_samples(split, samples_dir, "holdout")
+    holdout_acc, n_holdout_windows, n_unseen = window_accuracy(ckpt, holdout)
 
     val_ids = sorted(sid for sid, part in split.items() if part == "val")
     gt = evaluate.load_ground_truth(samples_dir, val_ids)
@@ -185,12 +281,14 @@ def compute_gaps(
         "segment_f1": evaluate.r6(val_f1 - holdout_f1),
         "val_accuracy": evaluate.r6(val_accuracy),
         "val_f1": evaluate.r6(val_f1),
-        "holdout_name_accuracy": evaluate.r6(holdout_acc),
+        "holdout_window_accuracy": evaluate.r6(holdout_acc),
         "holdout_f1": evaluate.r6(holdout_f1),
+        "n_holdout_windows": n_holdout_windows,
+        "n_holdout_windows_unseen_label": n_unseen,
     }
 
 
-def _over_threshold(gaps: dict[str, float]) -> bool:
+def _over_threshold(gaps: dict[str, Any]) -> bool:
     return (
         abs(gaps["promotion_metric"]) > GAP_THRESHOLD
         or abs(gaps["segment_f1"]) > GAP_THRESHOLD
@@ -216,17 +314,31 @@ def _gap_value(gaps: dict[str, Any], key: str, where: str) -> float:
     return float(value)
 
 
+def _record_run_id(rec: dict[str, Any], where: str) -> str:
+    run_id = rec.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        _fail(f"{where} has no run_id: the streak counts runs, not records")
+    return run_id
+
+
 def replay_streak(records: list[Any]) -> int:
     """Streak over prior leakage_gap records, in log order.
 
     A promoted record's gaps are validated on replay: a non-numeric or
     missing gap fails closed (GapError -> exit 2) instead of raising
-    TypeError or silently reading as 0.
+    TypeError or silently reading as 0. Every record needs a run_id, and
+    no run may have two records: either would let one run count twice.
     """
     streak = 0
+    seen: set[str] = set()
     for i, rec in enumerate(records):
         if not isinstance(rec, dict) or rec.get("kind") != "leakage_gap":
             continue
+        where = f"registry record #{i}"
+        run_id = _record_run_id(rec, where)
+        if run_id in seen:
+            _fail(f"{where} repeats run_id {run_id!r}: one record per run")
+        seen.add(run_id)
         promotion = rec.get("promotion")
         gaps = rec.get("val_minus_holdout")
         if promotion == "bootstrap":
@@ -234,7 +346,6 @@ def replay_streak(records: list[Any]) -> int:
         if promotion == "promote":
             if not isinstance(gaps, dict):
                 _fail(f"registry record #{i} has no val_minus_holdout dict")
-            where = f"registry record #{i}"
             # Validate both before comparing: `or` would short-circuit
             # past the second validation when the first gap is over.
             promotion_gap = _gap_value(gaps, "promotion_metric", where)
@@ -248,14 +359,37 @@ def replay_streak(records: list[Any]) -> int:
     return streak
 
 
+def run_id_for(fingerprint: dict[str, Any]) -> str:
+    """TRAINING_RUN_ID when set, else a hash of the run's inputs and
+    results (module docstring, "Run id")."""
+    if os.environ.get(RUN_ID_ENV):
+        return os.environ[RUN_ID_ENV]
+    blob = json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _recorded(registry: list[Any], run_id: str) -> int | None:
+    """Index of this run's leakage_gap record in the registry, if any."""
+    for i, rec in enumerate(registry):
+        if (
+            isinstance(rec, dict)
+            and rec.get("kind") == "leakage_gap"
+            and rec.get("run_id") == run_id
+        ):
+            return i
+    return None
+
+
 def run(
     metrics_path: Path,
+    model_path: Path,
     report_path: Path,
     split_path: Path,
     samples_dir: Path,
     registry_path: Path,
     promotion: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
+    """Write the gaps; returns (this run's record, whether it was appended)."""
     metrics = _load_json(metrics_path)
     report = _load_json(report_path)
     split = _load_json(split_path)
@@ -270,11 +404,25 @@ def run(
     inputs = report.get("inputs") if isinstance(report, dict) else None
     if not isinstance(inputs, dict) or inputs.get("split_sha256") != split_sha:
         _fail("report inputs.split_sha256 does not match split.json")
+    ckpt = train.load_checkpoint(model_path)
 
-    gaps = compute_gaps(metrics, report, split, samples_dir)
+    gaps = compute_gaps(metrics, report, split, samples_dir, ckpt)
+    run_id = run_id_for(
+        {
+            "split_sha256": split_sha,
+            "metrics_sha256": evaluate.sha256_file(metrics_path),
+            "predictions_sha256": inputs.get("predictions_sha256"),
+            "promotion": promotion,
+            "val_minus_holdout": gaps,
+        }
+    )
 
     registry = load_registry(registry_path)
-    streak = replay_streak(registry)
+    streak = replay_streak(registry)  # validates the whole log, run ids included
+    existing = _recorded(registry, run_id)
+    if existing is not None:
+        # A re-run takes the streak as of its own record, not after it.
+        streak = replay_streak(registry[:existing])
     if promotion == "promote":
         streak = streak + 1 if _over_threshold(gaps) else 0
     elif promotion == "bootstrap":
@@ -282,6 +430,29 @@ def run(
     else:
         streak = 0
     flagged = streak >= FLAG_STREAK
+
+    record: dict[str, Any] = {
+        "kind": "leakage_gap",
+        "decided_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "run_id": run_id,
+        "promotion": promotion,
+        "val_minus_holdout": gaps,
+        "streak_promoted_runs_over_threshold": streak,
+        "flagged": flagged,
+    }
+    if existing is not None:
+        old = registry[existing]
+        compared = (
+            "promotion",
+            "val_minus_holdout",
+            "streak_promoted_runs_over_threshold",
+            "flagged",
+        )
+        if any(old.get(key) != record[key] for key in compared):
+            _fail(
+                f"registry already records run {run_id!r} with different "
+                "results: one run id names one run"
+            )
 
     report["val_minus_holdout"] = {
         **gaps,
@@ -294,14 +465,8 @@ def run(
         fh.write("\n")
     tmp.replace(report_path)
 
-    record: dict[str, Any] = {
-        "kind": "leakage_gap",
-        "decided_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "promotion": promotion,
-        "val_minus_holdout": gaps,
-        "streak_promoted_runs_over_threshold": streak,
-        "flagged": flagged,
-    }
+    if existing is not None:
+        return registry[existing], False
     registry.append(record)
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = registry_path.with_suffix(registry_path.suffix + ".tmp")
@@ -309,11 +474,11 @@ def run(
         json.dump(registry, fh, indent=2, sort_keys=True)
         fh.write("\n")
     tmp.replace(registry_path)
-    return record
+    return record, True
 
 
 def load_registry(path: Path) -> list[Any]:
-    """promote.py's registry read, without importing promote (no numpy)."""
+    """promote.py's registry read, failing with GapError (exit 2)."""
     if not path.exists():
         return []
     try:
@@ -329,6 +494,7 @@ def load_registry(path: Path) -> list[Any]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Val-minus-holdout leakage gap.")
     ap.add_argument("--metrics", required=True, type=Path)
+    ap.add_argument("--model", required=True, type=Path)
     ap.add_argument("--report", required=True, type=Path)
     ap.add_argument("--split", required=True, type=Path)
     ap.add_argument("--samples-dir", required=True, type=Path)
@@ -336,15 +502,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--promotion", required=True, choices=PROMOTIONS)
     args = ap.parse_args(argv)
     try:
-        record = run(
+        record, appended = run(
             args.metrics,
+            args.model,
             args.report,
             args.split,
             args.samples_dir,
             args.registry,
             args.promotion,
         )
-    except (GapError, ValueError) as e:
+    except (GapError, ValueError, TypeError) as e:
         print(f"leakage_gap.py: error: {e}", file=sys.stderr)
         return EXIT_ERROR
     gaps = record["val_minus_holdout"]
@@ -353,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         f"segment_f1 {gaps['segment_f1']:+.4f}, "
         f"streak {record['streak_promoted_runs_over_threshold']}, "
         f"flagged {record['flagged']}"
+        + ("" if appended else " (run already recorded; registry unchanged)")
     )
     return EXIT_OK
 

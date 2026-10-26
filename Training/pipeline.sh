@@ -275,12 +275,15 @@ set; its new fixture scores are staged in $UPDATE."
     ;;
 esac
 # Person-leakage gap (§2.6, #42): val-minus-holdout for the promotion
-# metric and segment F1, written into the challenger's holdout report,
-# with the streak tracked in the registry. Runs before publish so the
-# published report carries the gap; a corrupt input fails the run
-# rather than publishing a model whose leakage went unmeasured.
+# metric (window accuracy, computed on holdout as train.py computes it on
+# val) and segment F1, written into the challenger's holdout report,
+# with the streak tracked in the registry per run (TRAINING_RUN_ID, else
+# a hash of the run's inputs). Runs before publish so the published
+# report carries the gap; a corrupt input fails the run rather than
+# publishing a model whose leakage went unmeasured.
 python Training/leakage_gap.py \
   --metrics "$RUN/challenger/metrics.json" \
+  --model "$RUN/challenger/model.npz" \
   --report "$RUN/challenger/holdout_report.json" \
   --split "$RUN/split.json" --samples-dir "$DATASET/samples" \
   --registry "$REGISTRY" --promotion "$promotion" \
@@ -355,7 +358,12 @@ if gap:
         "reopens how splits group sources (§2.6)"
         if gap["flagged"] else ""
     )
-    print(f"- Val-minus-holdout (§2.6): promotion {gap['promotion_metric']:+.4f}, "
+    unseen = gap["n_holdout_windows_unseen_label"]
+    unseen_note = f", {unseen} with a label train never saw" if unseen else ""
+    print(f"- Val-minus-holdout (§2.6): val_accuracy {gap['promotion_metric']:+.4f} "
+          f"(window accuracy {gap['val_accuracy']:.4f} vs holdout "
+          f"{gap['holdout_window_accuracy']:.4f} over "
+          f"{gap['n_holdout_windows']} holdout windows{unseen_note}), "
           f"segment_f1 {gap['segment_f1']:+.4f} "
           f"(val_f1 {gap['val_f1']:.4f} vs holdout f1 {gap['holdout_f1']:.4f}); "
           f"streak {gap['streak_promoted_runs_over_threshold']} promoted runs "

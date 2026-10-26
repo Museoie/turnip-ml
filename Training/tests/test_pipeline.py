@@ -283,6 +283,24 @@ class GatesTest(PipelineTestCase):
         self.assertEqual(
             [r["decision"] for r in gates], ["pass", "archive", "pass", "archive"]
         )
+        # Without TRAINING_RUN_ID the leakage step names a run by a hash of
+        # its inputs and results: the identical second run is the same run
+        # to the streak (#42), so it appends no second record.
+        gaps = [r for r in registry if r.get("kind") == "leakage_gap"]
+        self.assertEqual(len(gaps), 1)
+        self.assertTrue(gaps[0]["run_id"].startswith("sha256:"))
+
+    def test_leakage_records_are_keyed_by_training_run_id(self):
+        self.seed_champion()
+        for run_id in ("40296249195-1", "40296249195-1", "40296249196-1"):
+            self.ok(TRAINING_RUN_ID=run_id)
+        registry = self.load(self.root / "data" / "registry.json")
+        gaps = [r for r in registry if r.get("kind") == "leakage_gap"]
+        self.assertEqual(
+            [r["run_id"] for r in gaps], ["40296249195-1", "40296249196-1"]
+        )
+        summary = (self.root / "summary.md").read_text()
+        self.assertIn("holdout windows", summary)
 
     def test_regression_skips_promotion_and_quarantines(self):
         self.seed_champion(
