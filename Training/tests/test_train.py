@@ -196,6 +196,66 @@ class TrainTest(unittest.TestCase):
         self.assertTrue(segs[0]["is_combo"])
         self.assertEqual((segs[0]["start_frame"], segs[0]["end_frame"]), (0, 16))
 
+    def test_background_margin_excludes_boundary_windows(self) -> None:
+        # TRAINING_DESIGN.md §2.5: windows within ±2 s of a labeled segment
+        # are excluded from the background pool, not labeled background.
+        # Fixture is 10 Hz, so the 2 s margin is 20 frames.
+        segments = evaluate.ground_truth_segments(
+            [{"name": "gainer", "start_frame": 100, "end_frame": 116}],
+            "test",
+        )
+        margin = 20
+        # Far from the segment: background, with or without the margin.
+        self.assertEqual(train.label_for_window(segments, 0, 8), "background")
+        self.assertEqual(train.label_for_window(segments, 0, 8, margin), "background")
+        # Ending 12 frames before the segment starts: inside the margin.
+        self.assertEqual(train.label_for_window(segments, 80, 88, margin), None)
+        # Touching the segment with under-half overlap: gap 0, excluded.
+        self.assertEqual(train.label_for_window(segments, 92, 100, margin), None)
+        self.assertEqual(train.label_for_window(segments, 94, 102, margin), None)
+        # Exactly margin_frames away: background, not excluded.
+        self.assertEqual(train.label_for_window(segments, 72, 80, margin), "background")
+        # Without the margin the same window is background (default 0).
+        self.assertEqual(train.label_for_window(segments, 80, 88), "background")
+
+    def test_background_margin_never_demotes_a_trick_window(self) -> None:
+        # >= half overlap labels the window even inside another segment's
+        # margin: the margin excludes background candidates only.
+        segments = evaluate.ground_truth_segments(
+            [
+                {"name": "gainer", "start_frame": 100, "end_frame": 116},
+                {"name": "corkscrew", "start_frame": 120, "end_frame": 136},
+            ],
+            "test",
+        )
+        self.assertEqual(train.label_for_window(segments, 108, 116, 20), "gainer")
+
+    def test_build_dataset_drops_margin_windows(self) -> None:
+        # One 16-frame segment at [100, 116) in a 200-frame sample, 8-frame
+        # windows at stride 8: 25 windows, of which the 4 inside the 20-frame
+        # margin (starts 80, 88, 120, 128) drop out entirely — no row, so
+        # they never enter the background pool.
+        sample = {
+            "sample_id": "s",
+            "keypoints": np.zeros((200, 17, 3)),
+            "tricks": [
+                {
+                    "clip_id": "c1",
+                    "name": "gainer",
+                    "start_frame": 100,
+                    "end_frame": 116,
+                }
+            ],
+        }
+        _, labels, prov = train.build_dataset(np, [sample], 8, 8, margin_frames=20)
+        self.assertEqual(len(labels), 21)
+        self.assertEqual(labels.count("background"), 18)
+        self.assertEqual(labels.count("gainer"), 3)
+        self.assertEqual(
+            sorted(start for _, start, _ in prov if start in (80, 88, 120, 128)),
+            [],
+        )
+
     def test_window_label_counts_each_name_once(self) -> None:
         # Two clips labeling overlapping spans "gainer": the window is
         # "gainer", not "gainer+gainer".

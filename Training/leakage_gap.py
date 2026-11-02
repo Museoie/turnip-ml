@@ -41,7 +41,8 @@ Each gap compares one metric, computed the same way on both splits.
   --metric): train.py's window-level argmax accuracy over every val
   window, "background" windows included. The holdout side is that same
   computation over every holdout window: the model's windowing
-  (train.build_dataset at its window_frames/window_stride), labels from
+  (train.build_dataset at its window_frames/window_stride and the
+  background margin the checkpoint trained with), labels from
   train.label_for_window over evaluate.ground_truth_segments, the
   checkpoint's feature standardization, and train.predict's argmax.
   The holdout report's name_accuracy_given_detection is a segment-level
@@ -232,9 +233,17 @@ def window_accuracy(
     same standardization (the checkpoint's feature stats, which train.py
     applied to val before saving them), same argmax (train.predict), and
     the fraction of windows whose predicted label equals the true one.
+    The background margin is the one the checkpoint trained with
+    (`background_margin_frames`, absent on older checkpoints meaning 0),
+    so the window set matches the run's exactly.
     """
     window_frames = int(ckpt["window_frames"])
     window_stride = int(ckpt["window_stride"])
+    margin_frames = (
+        int(ckpt["background_margin_frames"])
+        if "background_margin_frames" in ckpt
+        else 0
+    )
     classes = [str(c) for c in ckpt["classes"]]
     windowed = [s for s in samples if s["keypoints"].shape[0] >= window_frames]
     if not windowed:
@@ -242,7 +251,9 @@ def window_accuracy(
             f"no windows: every sample is shorter than the model's "
             f"window_frames ({window_frames}), so window accuracy is undefined"
         )
-    X_raw, labels, _ = train.build_dataset(np, windowed, window_frames, window_stride)
+    X_raw, labels, _ = train.build_dataset(
+        np, windowed, window_frames, window_stride, margin_frames
+    )
     X = (np.asarray(X_raw) - ckpt["feat_mean"]) / ckpt["feat_std"]
     pred = [classes[i] for i in train.predict(np, X, ckpt["W"], ckpt["b"])]
     hits = np.array([p == y for p, y in zip(pred, labels, strict=True)])
