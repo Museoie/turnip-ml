@@ -83,6 +83,7 @@ CONFIG_SCHEMA: dict[str, type | tuple[type, ...]] = {
     "l2": (float, int),
     "class_balance_exponent": (float, int),
     "background_ratio": (float, int),
+    "background_margin_seconds": (float, int),
     "init_checkpoint": str,
 }
 
@@ -128,6 +129,8 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("class_balance_exponent must be non-negative")
     if not 0 <= cfg["background_ratio"] < 1:
         raise ValueError("background_ratio must be in [0, 1)")
+    if not cfg["background_margin_seconds"] >= 0:
+        raise ValueError("background_margin_seconds must be non-negative")
     return cfg
 
 
@@ -154,6 +157,7 @@ def _select_backend(compute: str) -> types.ModuleType:
 SPLITS = ("train", "val", "holdout")
 BACKGROUND = "background"
 N_KEYPOINTS = 17  # MoveNet-17 order, 10 Hz canonical (master plan, TKP1)
+POSE_FPS = 10  # canonical pose rate; converts the §2.5 margin from seconds to frames
 
 
 def load_split(path: Path) -> dict[str, str]:
@@ -251,10 +255,13 @@ def train_name_counts(train: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def label_for_window(
-    segments: list[tuple[int, int, frozenset[str]]], start: int, end: int
-) -> str:
+    segments: list[tuple[int, int, frozenset[str]]],
+    start: int,
+    end: int,
+    margin_frames: int = 0,
+) -> str | None:
     """Label for a window: the names of every segment covering >= half of it,
-    else background.
+    else background — unless the window falls in the background margin.
 
     segments are evaluate.ground_truth_segments() of the sample's tricks, the
     segments the holdout evaluation scores against. Center-frame labeling
@@ -263,6 +270,16 @@ def label_for_window(
     label consistent with what the window's features show. N names label the
     window "a+b" (sorted, each name once) — is_combo is derived from the "+"
     downstream, per the model output contract.
+
+    Margin (TRAINING_DESIGN.md §2.5): a window that would be background but
+    lies within margin_frames of a labeled segment is excluded from the
+    background pool — returned as None, not "background". Boundaries are
+    where labelers disagree, and training on them as hard negatives injects
+    label noise. A window is in the margin when the gap between its interval
+    and the nearest segment interval is under margin_frames (a touching
+    window has gap 0); a window exactly margin_frames away is background.
+    Trick windows are never demoted: >= half overlap labels the window even
+    inside another segment's margin.
     """
     names = sorted(
         {
@@ -272,7 +289,14 @@ def label_for_window(
             for name in seg_names
         }
     )
-    return "+".join(names) if names else BACKGROUND
+    if names:
+        return "+".join(names)
+    if margin_frames > 0 and any(
+        max(seg_start - end, start - seg_end, 0) < margin_frames
+        for seg_start, seg_end, _ in segments
+    ):
+        return None
+    return BACKGROUND
 
 
 def featurize_window(
@@ -296,11 +320,14 @@ def build_dataset(
     samples: list[dict[str, Any]],
     window_frames: int,
     window_stride: int,
+    margin_frames: int = 0,
 ) -> tuple[npt.NDArray[np.float64], list[str], list[tuple[str, int, str]]]:
     """Window every sample -> (features, labels, provenance).
 
     Provenance is (sample_id, window_start, label) per row, used to decode
-    predicted windows back into trick segments.
+    predicted windows back into trick segments. Windows in the background
+    margin (§2.5) are excluded entirely — no row, so they never enter the
+    background pool — rather than labeled background.
     """
     feats: list[npt.NDArray[np.float64]] = []
     labels: list[str] = []
@@ -313,7 +340,9 @@ def build_dataset(
         )
         for start in range(0, n - window_frames + 1, window_stride):
             end = start + window_frames
-            label = label_for_window(segments, start, end)
+            label = label_for_window(segments, start, end, margin_frames)
+            if label is None:
+                continue
             feats.append(featurize_window(xp, kps[start:end]))
             labels.append(label)
             prov.append((s["sample_id"], start, label))
@@ -578,8 +607,9 @@ def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
     name_counts = train_name_counts(train_samples)
 
     W, S = cfg["window_frames"], cfg["window_stride"]
-    Xtr_raw, ytr_labels, _ = build_dataset(xp, train_samples, W, S)
-    Xva_raw, yva_labels, va_prov = build_dataset(xp, val_samples, W, S)
+    margin_frames = round(float(cfg["background_margin_seconds"]) * POSE_FPS)
+    Xtr_raw, ytr_labels, _ = build_dataset(xp, train_samples, W, S, margin_frames)
+    Xva_raw, yva_labels, va_prov = build_dataset(xp, val_samples, W, S, margin_frames)
 
     classes = sorted(set(ytr_labels))
     cls_index = {c: i for i, c in enumerate(classes)}
@@ -669,6 +699,7 @@ def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
         feat_std=feat_std,
         window_frames=np.int64(W),
         window_stride=np.int64(S),
+        background_margin_frames=np.int64(margin_frames),
     )
     metrics = {
         "seed": cfg["seed"],

@@ -43,6 +43,7 @@ class PipelineConfigsTest(unittest.TestCase):
             "l2",
             "class_balance_exponent",
             "background_ratio",
+            "background_margin_seconds",
         ):
             self.assertEqual(pipeline[key], full[key], key)
 
