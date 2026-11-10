@@ -27,8 +27,9 @@ what those PRs implement, it says so explicitly.
 - Each row also carries the label's provenance (`BACKEND_DESIGN.md`
   §1.2.18): its `origin` (`typed` | `vocabulary` | `model`), and the
   clip's `proposal_model_version`, `suggested_names` and
-  `suggestions_withheld`. Training uses them to measure and limit the
-  model learning from its own suggestions (§6.4).
+  `suggestions_withheld`. Training will use them to measure and limit the
+  model learning from its own suggestions (§6.4, proposed — not yet
+  implemented, turnip-ml#40).
 - On-device personalization (`MODEL_CONTRACT.md` §3.5) adds nothing to
   the export. It trains on the device from the user's own library and
   uploads nothing it learns.
@@ -333,12 +334,14 @@ artifact:
 - **Background false-positive count** — spurious segments fired in
   unlabeled regions.
 - **By origin** — name accuracy and segment F1 split by label `origin`
-  and by blind vs. not (§6.4), reported, not gated.
+  and by blind vs. not (§6.4), reported, not gated. **Proposed (not yet
+  implemented)** — tracked as turnip-ml#40; the evaluator does not split
+  by origin yet.
 
 Additionally recommended for the champion/challenger comparison:
 **mAP at tIoU ∈ {0.3, 0.5, 0.7}** as the segment-quality summary. The
-evaluator (PR #19) computes the core set above; mAP is the proposed
-promotion-facing roll-up.
+evaluator (PR #19) computes the core set above except the By-origin split
+(§6.4, proposed); mAP is the proposed promotion-facing roll-up.
 
 Deliberately **not** PCK: PCK is a pose-estimation metric. Pose
 estimation is MoveNet's job, and fine-tuning it is off the table
@@ -436,6 +439,11 @@ estimation is MoveNet's job, and fine-tuning it is off the table
   logged.
 
 ### 6.4 Provenance and rubber-stamping
+
+**Proposed (not yet implemented)** — tracked as turnip-ml#40. The
+measures below describe the intended design, not current behavior:
+nothing computes them yet, and the nightly summary reports none of
+them.
 
 Once the model pre-fills names (`MODEL_CONTRACT.md` §3.3), keeping its
 suggestion is the cheapest way to name a clip, and the app's Profile
