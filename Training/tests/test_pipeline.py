@@ -25,7 +25,7 @@ SOURCE_B = "b" * 64
 # (FROM_SCRATCH, BOOTSTRAP_CHAMPION, ...) is set by the test or not at all.
 INHERITED_ENV = ("HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT")
 FULL_SLOT = ["champion.json", "fixture_scores.json", "metrics.json", "model.npz"]
-# The smoke dataset has 4 train and 2 holdout sources, far below the
+# The smoke dataset splits 4 train and 2 val samples, far below the
 # membership-inference check's minimum, so the template's copy of the check
 # is made lenient: every test but the one that checks the real constants
 # exercises the gates behind it.
@@ -433,8 +433,8 @@ class GatesTest(PipelineTestCase):
             self.assertFalse((self.run_dir / "challenger" / "publish.json").exists())
 
     def test_failed_membership_inference_archives_the_challenger(self):
-        # The real constants: the smoke dataset's 2 holdout sources are
-        # under the minimum, so the check fails and a challenger that
+        # The real constants: the smoke dataset's 2 val samples are under
+        # the minimum, so the check fails and a challenger that
         # would otherwise promote is archived.
         set_mi_constants(self.root, MI_STRICT)
         self.seed_champion(**{"metrics.json": {"val_accuracy": 0.5}})
@@ -445,7 +445,7 @@ class GatesTest(PipelineTestCase):
         self.assertIn("nothing was promoted", result.stdout)
         report = self.load(self.run_dir / "challenger" / "holdout_report.json")
         self.assertIs(report["membership_inference"]["passed"], False)
-        self.assertEqual(report["membership_inference"]["n_holdout_sources"], 2)
+        self.assertEqual(report["membership_inference"]["n_val_sources"], 2)
         promotion = self.load(self.run_dir / "promotion.json")
         self.assertEqual(promotion["decision"], "archive")
         summary = (self.root / "summary.md").read_text()

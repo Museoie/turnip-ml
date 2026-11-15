@@ -446,23 +446,28 @@ estimation is MoveNet's job, and fine-tuning it is off the table
   the model, so treating it as anonymous needs evidence
   (`BACKEND_DESIGN.md` §9 Q8, EDPB Opinion 28/2024). The holdout report
   carries a membership-inference check (`Training/membership_inference.py`):
-  can the model's outputs tell training sources from holdout sources
+  can the model's outputs tell training sources from validation sources
   better than chance?
   - **Attack:** a confidence attack (Yeom et al., 2018). Each window
     scores the model's probability for its true label, windowed and
     standardized as training saw it; a source scores the mean over its
     windows. A window whose label the model has no class for is left
     out and counted.
+  - **Non-members: the validation sources.** They come from the same
+    contributor pool as the training sources and differ from them only
+    in not being trained on, so the AUC measures memorized sources, not
+    a shift in who is filmed. The curated holdout (§2.6) is a few people
+    outside the pool, too few sources to reach the minimum below. A
+    model that learned a person rather than their sources can pass,
+    since the same people are on both sides; the `val − holdout` gap
+    above watches for that.
   - **Measure:** the ROC AUC of training-source scores against
-    holdout-source scores. 0.5 is chance.
+    validation-source scores. 0.5 is chance.
   - **Pass** iff AUC ≤ 0.60 and each side has at least 20 sources.
-    *(Judgment call on both, §10 Q6.)* With 20 holdout sources a model
-    that leaks nothing still scores above 0.60 in about 7% of runs;
-    fewer sources give no evidence either way, so the check fails
-    rather than pass on noise.
-  - The holdout's people are outside the contributor pool (§2.6), so a
-    model that learned individuals fails as well as one that memorized
-    sources. That errs on the side of failing.
+    *(Judgment call on both, §10 Q6; the maintainer confirmed 20.)*
+    With 20 validation sources a model that leaks nothing still scores
+    above 0.60 in about 7% of runs; fewer sources give no evidence
+    either way, so the check fails rather than pass on noise.
   - The promotion gate archives a challenger that did not pass (§8).
 - **Scheduled retrain.** Models are retrained from scratch on a set
   schedule, so deleted data leaves within one cycle (§2.1, scheduled
@@ -770,11 +775,11 @@ one review can clear.
    measurement before it can gate anything.
 5. Promotion metric for the production architecture (§8) — segment
    composite vs window accuracy.
-6. Membership-inference check (§6.2) — a confidence attack, passing at
-   AUC ≤ 0.60 with at least 20 sources a side, is a starting point. A
+6. Membership-inference check (§6.2) — a confidence attack against the
+   validation sources, passing at AUC ≤ 0.60 with at least 20 sources a
+   side (20 confirmed by the maintainer), is a starting point. A
    stronger attack (shadow models, per-window rather than per-source
-   scores) or val sources as the non-members, which share the
-   contributor pool, may replace it.
+   scores) may replace it.
 7. Person-leakage threshold (§2.6) — 0.05 absolute over three promoted
    runs is a starting point.
 8. Class-balance scheme (§2.7) — 1/√count is a starting point.

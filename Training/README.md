@@ -14,7 +14,7 @@ what this repo validates; see the root README for repo-wide conventions.
 - `train.py` — champion training / fine-tuning script (turnip-ml#13).
   Hermetic TOML config, deterministic, CI smoke-tested.
 - `membership_inference.py` — the membership-inference check: can the
-  model's outputs tell training sources from holdout sources? Written
+  model's outputs tell training sources from validation sources? Written
   into the holdout report; the promotion gate archives a model that
   fails it (`docs/TRAINING_DESIGN.md` §6.2).
 - `name_metrics.py` — per-name holdout precision/recall plus holdout and
@@ -259,8 +259,8 @@ job summary:
   it is refused while the fixture set has nothing to score;
 - a fixture regression: promotion is skipped;
 - a challenger that failed the membership-inference check: the
-  promotion gate archives it. The smoke fixture has 2 holdout sources,
-  under the check's minimum of 20, so the `synthetic` rehearsal's
+  promotion gate archives it. The smoke fixture's synthetic split has 2
+  val samples, under the check's minimum of 20, so the `synthetic` rehearsal's
   second run always archives;
 - a champion without `metrics.json`: the fixture gate runs, but the
   promotion gate has nothing to compare against and does not;

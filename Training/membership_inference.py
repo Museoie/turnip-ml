@@ -4,7 +4,7 @@
 Every device receives the published model, so treating it as anonymous
 needs evidence that its outputs do not give away which sources it was
 trained on. This script runs a simple membership-inference attack: can
-the model's outputs tell its training sources from holdout sources
+the model's outputs tell its training sources from validation sources
 better than chance? The result goes into the holdout report, and the
 promotion gate (Training/promote.py) refuses to promote a model that
 fails it (§8).
@@ -13,7 +13,7 @@ Inputs
 ------
 --model        model.npz from Training/train.py: the model under test.
 --split        split.json the model was trained on. Train samples are the
-               members, holdout samples the non-members. Checked against
+               members, val samples the non-members. Checked against
                the report's inputs.split_sha256, so the check always
                describes the run the report scores.
 --samples-dir  sample JSON dir (keypoints and ground-truth tricks).
@@ -37,30 +37,34 @@ split, so members and non-members are sources, as the design asks.
 
 The attack's power is the ROC AUC of those scores, members against
 non-members: the probability that a random training source scores above
-a random holdout source, ties counting one half. 0.5 is chance. Scores
+a random validation source, ties counting one half. 0.5 is chance. Scores
 are rounded to 6 decimals before they are compared, so the AUC does not
 depend on float noise.
 
 Pass iff auc <= MAX_AUC and each side has at least MIN_SOURCES
 scored sources. *(Judgment calls, TRAINING_DESIGN.md §10 Q6: 0.60 means
-the attacker ranks a training source above a holdout source at most 60%
-of the time, an advantage of at most 0.2 over chance. 20 sources keeps
-the AUC's chance spread small enough to read: with 20 holdout sources
-and many more training ones, a model that leaks nothing still scores
-above 0.60 in about 7% of runs; such a run archives its challenger and
-the next run tries again. Fewer sources give no evidence either way, so the check fails
-rather than pass on noise.)*
+the attacker ranks a training source above a validation source at most
+60% of the time, an advantage of at most 0.2 over chance. 20 sources
+keeps the AUC's chance spread small enough to read: with 20 validation
+sources and many more training ones, a model that leaks nothing still
+scores above 0.60 in about 7% of runs; such a run archives its
+challenger and the next run tries again. Fewer sources give no evidence
+either way, so the check fails rather than pass on noise.)*
 
-The holdout's people are outside the contributor pool (§2.6), so the
-non-members also differ from the members in who is in them: a model
-that learned individuals fails this check as well as one that memorized
-sources. That errs on the side of failing.
+Why validation, not holdout: validation sources come from the same
+contributor pool as the training ones and differ from them only in not
+being trained on, so the AUC measures memorized sources, not a shift in
+who is filmed. The curated holdout is a few people outside the pool
+(§2.6), too few sources to reach MIN_SOURCES. The flip side: a model
+that learned a person rather than their sources can pass, since the
+same people are on both sides; the val-minus-holdout gap
+(leakage_gap.py) watches for that.
 
 Outputs
 -------
-The report gains "membership_inference": attack, auc, max_auc,
-min_sources, passed, the source and window counts on each side, and
-the mean score on each side (same format evaluate.py writes: indent 2,
+The report gains "membership_inference": attack, non_members ("val"),
+auc, max_auc, min_sources, passed, the source and window counts on each
+side, and the mean score on each side (same format evaluate.py writes: indent 2,
 sorted keys, trailing newline). Stdout carries aggregates only; no sample or source id.
 
 Exit codes: 0 = passed, 3 = failed (not an error: the report records it
@@ -90,6 +94,8 @@ ATTACK = "mean-true-class-confidence"
 MAX_AUC = 0.60
 MIN_SOURCES = 20
 REPORT_KEY = "membership_inference"
+# The split whose sources are the non-members.
+NON_MEMBERS = "val"
 EXIT_PASS = 0
 EXIT_ERROR = 2
 EXIT_FAIL = 3
@@ -154,9 +160,9 @@ def auc(members: list[float], non_members: list[float]) -> float:
     return wins / (len(members) * len(non_members))
 
 
-def passes(auc_value: float, n_train: int, n_holdout: int) -> bool:
+def passes(auc_value: float, n_train: int, n_val: int) -> bool:
     """The pass rule (module docstring, "The attack")."""
-    return auc_value <= MAX_AUC and min(n_train, n_holdout) >= MIN_SOURCES
+    return auc_value <= MAX_AUC and min(n_train, n_val) >= MIN_SOURCES
 
 
 def check(
@@ -164,7 +170,7 @@ def check(
 ) -> dict[str, Any]:
     """The report block for this model and split."""
     sides: dict[str, tuple[list[float], int, int]] = {}
-    for part in ("train", "holdout"):
+    for part in ("train", NON_MEMBERS):
         try:
             samples = leakage_gap.load_split_samples(split, samples_dir, part)
         except leakage_gap.GapError as e:
@@ -174,21 +180,22 @@ def check(
             _fail(f"no {part} sample has a scorable window: the attack is undefined")
         sides[part] = (scores, windows, unseen)
     members, n_train_windows, train_unseen = sides["train"]
-    non_members, n_holdout_windows, holdout_unseen = sides["holdout"]
+    non_members, n_val_windows, val_unseen = sides[NON_MEMBERS]
     value = evaluate.r6(auc(members, non_members))
     return {
         "attack": ATTACK,
+        "non_members": NON_MEMBERS,
         "auc": value,
         "max_auc": MAX_AUC,
         "min_sources": MIN_SOURCES,
         "passed": passes(value, len(members), len(non_members)),
         "n_train_sources": len(members),
-        "n_holdout_sources": len(non_members),
+        "n_val_sources": len(non_members),
         "n_train_windows": n_train_windows,
-        "n_holdout_windows": n_holdout_windows,
-        "n_windows_unseen_label": train_unseen + holdout_unseen,
+        "n_val_windows": n_val_windows,
+        "n_windows_unseen_label": train_unseen + val_unseen,
         "train_mean_score": evaluate.r6(float(np.mean(members))),
-        "holdout_mean_score": evaluate.r6(float(np.mean(non_members))),
+        "val_mean_score": evaluate.r6(float(np.mean(non_members))),
     }
 
 
@@ -236,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"membership inference: {verdict}, auc {block['auc']:.4f} "
         f"(max {block['max_auc']}) over {block['n_train_sources']} train and "
-        f"{block['n_holdout_sources']} holdout sources (min {block['min_sources']})"
+        f"{block['n_val_sources']} val sources (min {block['min_sources']})"
     )
     return EXIT_PASS if block["passed"] else EXIT_FAIL
 

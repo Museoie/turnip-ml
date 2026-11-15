@@ -100,7 +100,7 @@ class RunTest(unittest.TestCase):
                 "auc": 0.5,
                 "max_auc": 0.6,
                 "min_sources": 20,
-                "n_holdout_sources": 20,
+                "n_val_sources": 20,
                 **block,
             },
         }

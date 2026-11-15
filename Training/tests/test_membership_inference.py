@@ -90,11 +90,15 @@ class RunTest(unittest.TestCase):
         )
 
     def write_dataset(
-        self, train_x: list[float], holdout_x: list[float], name: str = "cork"
+        self,
+        train_x: list[float],
+        val_x: list[float],
+        name: str = "cork",
+        holdout_x: tuple[float, ...] = (),
     ) -> None:
         """One sample per x, labeled `name` on its whole length."""
         split = {}
-        for part, xs in (("train", train_x), ("holdout", holdout_x)):
+        for part, xs in (("train", train_x), ("val", val_x), ("holdout", holdout_x)):
             for i, x in enumerate(xs):
                 sid = f"{part}-{i:03d}"
                 split[sid] = part
@@ -137,7 +141,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(block["auc"], 1.0)
         self.assertIs(block["passed"], False)
         self.assertEqual(block["train_mean_score"], round(sigmoid(2.0), 6))
-        self.assertEqual(block["holdout_mean_score"], 0.5)
+        self.assertEqual(block["val_mean_score"], 0.5)
         self.assertEqual(block["n_train_windows"], 2 * n)
         # The report's other keys survive.
         self.assertEqual(json.loads(self.report_path.read_text())["f1"], 0.5)
@@ -153,7 +157,31 @@ class RunTest(unittest.TestCase):
         self.assertEqual(block["max_auc"], mi.MAX_AUC)
         self.assertEqual(block["min_sources"], mi.MIN_SOURCES)
         self.assertEqual(block["n_train_sources"], n)
-        self.assertEqual(block["n_holdout_sources"], n)
+        self.assertEqual(block["n_val_sources"], n)
+
+    def test_the_non_members_are_the_validation_sources(self) -> None:
+        # Train and val score alike; the holdout sources score far lower.
+        # Against val the check passes; against holdout the AUC would be 1.
+        n = mi.MIN_SOURCES
+        self.write_dataset([2.0] * n, [2.0] * n, holdout_x=(0.0,) * n)
+        self.assertEqual(self.run_check(), mi.EXIT_PASS)
+        block = self.block()
+        self.assertEqual(block["non_members"], "val")
+        self.assertEqual(block["auc"], 0.5)
+        self.assertEqual(block["n_val_sources"], n)
+        self.assertNotIn("n_holdout_sources", block)
+
+    def test_the_minimum_is_twenty_sources_a_side(self) -> None:
+        self.assertEqual(mi.MIN_SOURCES, 20)
+        for n_train, n_val, passed in (
+            (20, 20, True),
+            (20, 19, False),
+            (19, 20, False),
+        ):
+            with self.subTest(train=n_train, val=n_val):
+                self.write_dataset([1.0] * n_train, [1.0] * n_val)
+                self.run_check()
+                self.assertIs(self.block()["passed"], passed)
 
     def test_too_few_sources_fail_even_at_chance(self) -> None:
         n = mi.MIN_SOURCES
@@ -165,13 +193,13 @@ class RunTest(unittest.TestCase):
     def test_unseen_label_windows_are_left_out_and_counted(self) -> None:
         with mock.patch.object(mi, "MIN_SOURCES", 1):
             self.write_dataset([1.0], [1.0])
-            unseen = self.samples_dir / "holdout-001.json"
-            sample = json.loads((self.samples_dir / "holdout-000.json").read_text())
-            sample["sample_id"] = "holdout-001"
+            unseen = self.samples_dir / "val-001.json"
+            sample = json.loads((self.samples_dir / "val-000.json").read_text())
+            sample["sample_id"] = "val-001"
             sample["tricks"][0]["name"] = "gainer"
             unseen.write_text(json.dumps(sample))
             split = json.loads(self.split_path.read_text())
-            split["holdout-001"] = "holdout"
+            split["val-001"] = "val"
             self.split_path.write_text(json.dumps(split, sort_keys=True))
             digest = hashlib.sha256(self.split_path.read_bytes()).hexdigest()
             self.report_path.write_text(
@@ -180,8 +208,8 @@ class RunTest(unittest.TestCase):
             self.assertEqual(self.run_check(), mi.EXIT_PASS)
         block = self.block()
         self.assertEqual(block["n_windows_unseen_label"], 2)
-        self.assertEqual(block["n_holdout_sources"], 1)
-        self.assertEqual(block["n_holdout_windows"], 2)
+        self.assertEqual(block["n_val_sources"], 1)
+        self.assertEqual(block["n_val_windows"], 2)
 
     def test_stdout_carries_no_sample_id(self) -> None:
         n = mi.MIN_SOURCES
@@ -190,7 +218,7 @@ class RunTest(unittest.TestCase):
         out = self.stdout.getvalue()
         self.assertIn("auc 1.0000", out)
         self.assertNotIn("train-0", out)
-        self.assertNotIn("holdout-0", out)
+        self.assertNotIn("val-0", out)
 
     def test_output_is_deterministic(self) -> None:
         n = mi.MIN_SOURCES
@@ -208,7 +236,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.run_check(), mi.EXIT_ERROR)
         self.assertNotIn("membership_inference", self.report_path.read_text())
 
-    def test_no_holdout_sample_fails_closed(self) -> None:
+    def test_no_val_sample_fails_closed(self) -> None:
         self.write_dataset([1.0], [])
         self.assertEqual(self.run_check(), mi.EXIT_ERROR)
 

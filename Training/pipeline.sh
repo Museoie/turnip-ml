@@ -424,7 +424,7 @@ if gap:
 mi = report["membership_inference"]
 print(f"- Membership inference (§6.2): {membership}, auc {mi['auc']:.4f} "
       f"(max {mi['max_auc']}) over {mi['n_train_sources']} train and "
-      f"{mi['n_holdout_sources']} holdout sources (min {mi['min_sources']})")
+      f"{mi['n_val_sources']} val sources (min {mi['min_sources']})")
 
 
 def scores_line(label, path):

@@ -207,7 +207,7 @@ def run(
         reason = (
             "membership-inference check did not pass "
             f"(auc {privacy.get('auc')}, max {privacy.get('max_auc')}; "
-            f"{privacy.get('n_holdout_sources')} holdout sources, "
+            f"{privacy.get('n_val_sources')} val sources, "
             f"min {privacy.get('min_sources')})"
         )
     record = {
