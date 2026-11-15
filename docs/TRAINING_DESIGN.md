@@ -639,8 +639,10 @@ personal keep layer passed looks like any other model proposal
 On fixture regression (master plan §6), in order:
 
 1. **Discord alert** via webhook with the metrics delta (challenger vs
-   champion fixture scores) and the affected `source_id`s (step 2). **Never account IDs:** a Discord message outlives the farm's
-   30-day attribution window (`BACKEND_DESIGN.md` §8).
+   champion fixture scores) and how many segments step 2 quarantines.
+   **Counts only:** no segment, source or account IDs. A Discord message
+   outlives the farm's 30-day attribution window (`BACKEND_DESIGN.md`
+   §8) and every deletion; the ids stay in the run's private R2 record.
 2. **Quarantine the sources changed since the watermark:** one
    `data_quarantine` row per source —
    `(source_id, reason, metrics JSONB snapshot, quarantined_at)`, with
@@ -654,25 +656,33 @@ On fixture regression (master plan §6), in order:
      the dataset pull, so the list covers every new row the challenger
      trained on. A source that changes between the two pulls is
      over-quarantined, which is harmless.
-   - **How it reaches the farm:** the pipeline sends the source ids
-     explicitly, so the alert and the quarantine list are the same. The
-     farm inserts one row per id and skips sources already under an
-     open quarantine. The farm does not pick sources by time window: it
-     does not know the pipeline's watermark. The gate writes the list
-     as `quarantine.json`; the nightly job sends it with
-     `Training/report_quarantine.py` (`POST /api/quarantine`, at most
-     10000 ids per request) and holds the watermark until the farm has
-     accepted every request (§5).
-   - **With segments this step is blocked.** The export carries no
-     source ids (§1), so the list holds the new **segment** ids
-     (`fetch_dataset.py count --out-segments`, §2.1), and
-     `POST /api/quarantine` takes source ids only.
-     `report_quarantine.py` refuses a segment id with a message that
-     says so. A regression therefore still skips promotion and writes
-     `quarantine.json`, but the run fails at the send and the watermark
-     holds, so every later run lists those segments again. Unblocking
-     it needs the farm to quarantine by segment id, resolving each
-     through `segment_sources` to its source (§10 Q14).
+   - **By segment:** the export carries no source ids (§1), so the list
+     holds the new **segment** ids (`fetch_dataset.py count
+     --out-segments`, §2.1). The farm resolves each through
+     `segment_sources` to the source it was cut from and quarantines
+     that source, so every segment of it leaves the export, not only
+     the new ones.
+   - **How it reaches the farm:** the pipeline sends the segment ids
+     explicitly. The farm inserts one row per resolved source and skips
+     sources already under an open quarantine. The farm does not pick
+     sources by time window: it does not know the pipeline's watermark.
+     The gate writes the list as `quarantine.json` (`segment_id`,
+     `reason`, `metrics` rows); the nightly job sends it with
+     `Training/report_quarantine.py` (`POST /api/quarantine` body
+     `{segment_ids, reason, metrics}`, at most 10000 ids per request)
+     and holds the watermark until the farm has accepted every request
+     (§5).
+   - **What comes back:** counts only, never the sources behind the
+     segments: `segments.sources_quarantined`,
+     `segments.sources_already_open` and `segments.unlinked` (segments
+     that resolved to no source: de-linked by an account deletion, or
+     re-cut or deleted since the export pull, so there is nothing left
+     to quarantine). A segment re-cut since the pull is new to the next
+     run's list, so a relabel cannot slip past the gate this way. The script
+     checks the counts are consistent with what it sent, prints them
+     and nothing else, and fails the run otherwise. A regression run
+     therefore ends cleanly: promotion skipped, quarantine accepted,
+     watermark advanced.
 3. **Training exclusion:** the export excludes sources with an
    unresolved quarantine row (`resolution IS NULL`) or
    `resolution='purged'`; `resolution='released'` rows are re-included.
@@ -807,11 +817,11 @@ one review can clear.
     whole split bucket (about a tenth of all data) into holdout. The
     curated holdout footage needs a way to be named that survives
     re-cuts, such as a farm-side holdout flag carried as its own bucket.
-14. Quarantine with segments (§7) — `POST /api/quarantine` takes source
-    ids, and segments carry none, so a fixture regression can no longer
-    be quarantined: the run fails at the send and the watermark holds.
-    It needs the farm to accept segment ids and resolve them to sources
-    through `segment_sources`.
+14. Quarantine with segments (§7) — *resolved.* `POST /api/quarantine`
+    accepts `segment_ids` (turnip-farm #80) and resolves them to sources
+    through `segment_sources`; the answer gives source counts only.
+    `report_quarantine.py` sends the gate's segment ids, so a fixture
+    regression is quarantined again and its run ends cleanly.
 15. Windows on segments (§2.5) — 8-frame windows at stride 4 are the
     largest that leave any background in a segment's 5 frames of
     context. Longer context from the farm, or background segments cut

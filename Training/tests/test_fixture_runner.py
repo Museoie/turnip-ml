@@ -42,6 +42,8 @@ SMOKE_CONFIG = REPO / "Training" / "config" / "smoke.toml"
 REAL_SET = REPO / "Training" / "fixtures" / "tricks" / "fixtures.json"
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+# A farm segment id: the fixture gate's quarantine candidates.
+SEGMENT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 
 def standing(frames):
@@ -451,7 +453,7 @@ class RunnerEndToEndTest(TempDirTestCase):
 
     def gate(self, champion, challenger):
         ingested = self.root / "ingested.json"
-        ingested.write_text(json.dumps(["d" * 64]))
+        ingested.write_text(json.dumps([SEGMENT]))
         out = self.root / "gate"
         code = fixture_gate.main(
             [
@@ -519,7 +521,7 @@ class RunnerEndToEndTest(TempDirTestCase):
         self.assertEqual((blind["segment_iou"], blind["name_accuracy"]), (0.0, 0.0))
         code, quarantine = self.gate(champion, challenger)
         self.assertEqual(code, fixture_gate.EXIT_REGRESSION)
-        self.assertEqual([row["source_id"] for row in quarantine], ["d" * 64])
+        self.assertEqual([row["segment_id"] for row in quarantine], [SEGMENT])
 
     def test_scores_from_another_fixture_set_are_refused_by_the_gate(self):
         champion, challenger = (
