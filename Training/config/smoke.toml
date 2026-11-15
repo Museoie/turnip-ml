@@ -11,9 +11,10 @@ split_path = "Training/fixtures/smoke/split.json"
 samples_dir = "Training/fixtures/smoke/samples"
 out_dir = "runs/smoke"
 
-# Windowing: 8 frames @10Hz = 0.8s windows, 0.4s stride.
-window_frames = 8
-window_stride = 4
+# Windowing (TRAINING_DESIGN.md §4.1), in seconds; train.py converts at
+# the canonical 10 Hz and refuses a duration that is not whole frames.
+window_seconds = 0.8
+window_stride_seconds = 0.4
 
 # Optimizer (full-batch gradient descent, softmax cross-entropy + L2).
 learning_rate = 0.5

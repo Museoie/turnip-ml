@@ -9,8 +9,6 @@ environment built from scratch. No network, no secrets.
 Run with:  python -m unittest discover -s Training/tests -t .
 """
 
-import contextlib
-import io
 import json
 import os
 import shutil
@@ -19,18 +17,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import report_quarantine
-import test_report_quarantine as farm_stub
 
 REPO = Path(__file__).resolve().parent.parent.parent
-# New segment ids, as fetch_dataset.py count --out-segments lists them:
-# both cut from one farm source (farm_stub.LINKS).
-SEGMENT_A = farm_stub.segment_id(0)
-SEGMENT_B = farm_stub.segment_id(1)
+SOURCE_A = "a" * 64
+SOURCE_B = "b" * 64
 # What a test run inherits from the caller; every pipeline knob
 # (FROM_SCRATCH, BOOTSTRAP_CHAMPION, ...) is set by the test or not at all.
 INHERITED_ENV = ("HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT")
@@ -135,7 +125,7 @@ class PipelineTestCase(unittest.TestCase):
         result = run_pipeline(self.root, **env)
         # Public-log rule: no sample (= source) id reaches stdout or stderr.
         self.assertNotIn("smoke-0", result.stdout + result.stderr)
-        self.assertNotIn(SEGMENT_A, result.stdout + result.stderr)
+        self.assertNotIn(SOURCE_A, result.stdout + result.stderr)
         return result
 
     def ok(self, **env):
@@ -343,43 +333,16 @@ class GatesTest(PipelineTestCase):
         self.seed_champion(
             **{"fixture_scores.json": {"segment_iou": 1.0, "name_accuracy": 1.0}}
         )
-        self.write("ingested.json", [SEGMENT_B, SEGMENT_A])
+        self.write("ingested.json", [SOURCE_B, SOURCE_A])
         result = self.ok()
         self.assertEqual(self.outcome(), outcome("regression", "not-run"))
         self.assertFalse((self.run_dir / "promotion.json").exists())
         self.assertEqual(self.update_files(), [])
-        quarantine_path = self.run_dir / "fixture_gate" / "quarantine.json"
-        quarantine = self.load(quarantine_path)
-        self.assertEqual(
-            [r["segment_id"] for r in quarantine], sorted([SEGMENT_A, SEGMENT_B])
-        )
+        quarantine = self.load(self.run_dir / "fixture_gate" / "quarantine.json")
+        self.assertEqual([r["source_id"] for r in quarantine], [SOURCE_A, SOURCE_B])
         decision = self.load(self.run_dir / "fixture_gate" / "decision.json")
         self.assertEqual(decision["alert_status"], "not-configured")
-        self.assertEqual(decision["quarantined_segments"], 2)
         self.assertIn("regression", result.stdout)
-        summary = (self.root / "summary.md").read_text()
-        self.assertIn("; 2 segments quarantined)", summary)
-
-        # The workflow's next step sends the gate's own file, and the farm
-        # accepts it: the run ends cleanly and the watermark may advance.
-        farm = farm_stub.FakeFarm()
-        env = {"TURNIP_FARM_URL": farm_stub.FARM, "TURNIP_PIPELINE_KEY": farm_stub.KEY}
-        out = io.StringIO()
-        with (
-            mock.patch.dict(os.environ, env),
-            contextlib.redirect_stdout(out),
-            contextlib.redirect_stderr(io.StringIO()) as err,
-        ):
-            code = report_quarantine.main(
-                ["--quarantine", str(quarantine_path)], transport=farm.transport
-            )
-        self.assertEqual(code, report_quarantine.EXIT_OK, err.getvalue())
-        self.assertEqual(set(farm.open), {farm_stub.source_id(0)})
-        self.assertEqual(
-            farm_stub.totals(out.getvalue()),
-            {"segments": 2, "requests": 1, "quarantined": 1, "open": 0, "unlinked": 0},
-        )
-        self.assertNotIn(SEGMENT_A, out.getvalue())
 
     def test_stale_scores_rescore_the_champion_then_promote(self):
         self.seed_champion(

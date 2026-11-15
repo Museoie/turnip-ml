@@ -23,7 +23,6 @@ import sys
 import tempfile
 import threading
 import unittest
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -54,13 +53,8 @@ R2_ENV = {
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
-SEGMENT_NAMESPACE = uuid.UUID("5e600000-0000-4000-8000-000000000000")
-UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-
-def segment_id(sample: str) -> str:
-    """A farm-shaped segment id (a lowercase UUID) for a smoke sample."""
-    return str(uuid.uuid5(SEGMENT_NAMESPACE, sample))
+def source_id(sample: str) -> str:
+    return hashlib.sha256(sample.encode()).hexdigest()
 
 
 def stand_in_export(model_path: Path) -> bytes:
@@ -132,12 +126,6 @@ def farm_validation_error(body: Any) -> str | None:
             return "training_source_ids must be an array"
         if not all(isinstance(i, str) and HEX64.fullmatch(i) for i in ids):
             return "training_source_ids must be 64-char lowercase hex source ids"
-    if present("training_segment_ids"):
-        ids = body["training_segment_ids"]
-        if not isinstance(ids, list) or len(ids) > 100000:
-            return "training_segment_ids must be an array"
-        if not all(isinstance(i, str) and UUID_RE.fullmatch(i.lower()) for i in ids):
-            return "training_segment_ids must be segment uuids"
     return None
 
 
@@ -157,7 +145,6 @@ FARM_KEYS = {
     "val_metrics",
     "name_metrics",
     "training_source_ids",
-    "training_segment_ids",
 }
 
 
@@ -176,7 +163,6 @@ class FakeFarm:
                 "sha256": "0" * 64,
                 "r2_key": f"models/{current}.mlpackage.zip",
                 "holdout_report_r2_key": f"reports/{current}-holdout.json",
-                "input_desc": {"format": "TKS1"},
                 "promoted_at": "2026-10-01T03:40:00.000Z",
             }
         self.published = set(published) | ({current} if current else set())
@@ -222,8 +208,7 @@ class FakeFarm:
                 "id": "00000000-0000-4000-8000-000000000001",
                 "version": payload["version"],
                 "promoted_at": "2026-10-19T03:40:00.000Z",
-                # The farm maps segments to their sources; one each here.
-                "training_sources_recorded": len(set(payload["training_segment_ids"])),
+                "training_sources_recorded": len(set(payload["training_source_ids"])),
             }
         return error(404, "NOT_FOUND")
 
@@ -262,12 +247,12 @@ class RunFixture:
         smoke_split.update({"smoke-007": "holdout", "smoke-008": "holdout"})
         split, manifest = {}, []
         for name in sorted(smoke_split):
-            sid = segment_id(name)
+            sid = source_id(name)
             rec = json.loads((SMOKE / "samples" / f"{name}.json").read_text())
             rec["sample_id"] = sid
             (samples / f"{sid}.json").write_text(json.dumps(rec))
             split[sid] = smoke_split[name]
-            manifest.append(json.dumps({"sample_id": sid, "source_id": "bucket-0"}))
+            manifest.append(json.dumps({"sample_id": sid, "source_id": sid}))
         self.train_ids = sorted(s for s, part in split.items() if part == "train")
         (self.dataset / "manifest.jsonl").write_text("\n".join(manifest) + "\n")
         (self.dataset / "dataset_manifest.json").write_text(
@@ -376,8 +361,7 @@ class PublishRoundTripTest(PublishTestCase):
         self.assertEqual(
             body["holdout_report_r2_key"], "reports/trick-v1.0-holdout.json"
         )
-        self.assertEqual(body["training_segment_ids"], self.fixture.train_ids)
-        self.assertNotIn("training_source_ids", body)  # segments carry none
+        self.assertEqual(body["training_source_ids"], self.fixture.train_ids)
         self.assertEqual(
             body["name_metrics"],
             json.loads((self.challenger / "name_metrics.json").read_text()),
@@ -478,21 +462,6 @@ class VersionTest(PublishTestCase):
         farm = FakeFarm(current="trick-v1.3")
         self.assertEqual(self.main("--major", farm=farm), 0)
         self.assertEqual(farm.posts[0]["version"], "trick-v2.0")
-
-    def test_a_new_input_format_needs_min_client_version(self) -> None:
-        # The current model reads TKP1; this one reads the segment input.
-        farm = FakeFarm(current="trick-v1.3")
-        assert farm.current is not None
-        farm.current["input_desc"] = {"format": "TKP1"}
-        self.assertEqual(self.main(farm=farm), 2)
-        self.assertIn("MIN_CLIENT_VERSION", self.stderr.getvalue())
-        self.assertEqual(farm.posts, [])
-        self.assertEqual(self.r2.objects, {})  # nothing uploaded
-        with mock.patch.dict(os.environ, {"MIN_CLIENT_VERSION": "0.9.0"}):
-            self.assertEqual(self.main(farm=farm), 0, self.stderr.getvalue())
-        # The input changes, so the major version does too.
-        self.assertEqual(farm.posts[0]["version"], "trick-v2.0")
-        self.assertEqual(farm.posts[0]["min_client_version"], "0.9.0")
 
     def test_explicit_version(self) -> None:
         farm = FakeFarm(current="trick-v1.3")
@@ -630,24 +599,16 @@ class RefusalTest(PublishTestCase):
         split = json.loads((self.run_dir / "split.json").read_text())
         return min(sid for sid, part in split.items() if part == "train")
 
-    def test_synthetic_sample_ids_are_refused_before_any_side_effect(self) -> None:
-        # A smoke sample id in the train split, as synthetic mode has: the
-        # split, the manifest and the report agree, so only the id is wrong.
-        old = self.train_id()
-        split_path = self.run_dir / "split.json"
-        split = json.loads(split_path.read_text())
-        split["smoke-001"] = split.pop(old)
-        split_path.write_text(json.dumps(split, indent=2, sort_keys=True) + "\n")
+    def test_synthetic_source_ids_are_refused_before_any_side_effect(self) -> None:
         manifest = self.dataset / "manifest.jsonl"
-        manifest.write_text(manifest.read_text().replace(old, "smoke-001"))
-        report_path = self.challenger / "holdout_report.json"
-        report = json.loads(report_path.read_text())
-        report["inputs"]["split_sha256"] = hashlib.sha256(
-            split_path.read_bytes()
-        ).hexdigest()
-        report_path.write_text(json.dumps(report))
+        lines = manifest.read_text().splitlines()
+        rec = json.loads(lines[0])
+        rec["source_id"] = "source-a"
+        manifest.write_text("\n".join([json.dumps(rec), *lines[1:]]) + "\n")
+        split = json.loads((self.run_dir / "split.json").read_text())
+        self.assertEqual(split[rec["sample_id"]], "train")
         self.assertEqual(self.main(), 2)
-        self.assertIn("farm segment ids", self.stderr.getvalue())
+        self.assertIn("farm source ids", self.stderr.getvalue())
         self.assertNothingHappened()
         self.assertEqual(self.farm.calls, 0)
 

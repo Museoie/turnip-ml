@@ -1,10 +1,8 @@
 """Unit tests for Training/report_quarantine.py (turnip-ml#51).
 
 The fixture gate's quarantine.json -> POST /api/quarantine against a fake
-farm that validates like turnip-farm's readQuarantineInput, resolves
-segment ids to sources like its segment_sources join,
-answers counts only, and keeps one open quarantine per source, like its
-data_quarantine_open_uniq index.
+farm that validates like turnip-farm's readQuarantineInput and keeps one
+open quarantine per source, like its data_quarantine_open_uniq index.
 Hermetic: no network beyond a local HTTP stand-in, no secrets.
 
 Run: python -m unittest discover -s Training/tests -t .
@@ -22,7 +20,6 @@ import sys
 import tempfile
 import threading
 import unittest
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -35,7 +32,6 @@ import report_quarantine
 FARM = "https://farm.example"
 KEY = "pipeline-secret-for-tests"
 HEX64 = re.compile(r"[0-9a-f]{64}")
-UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 BEARER = re.compile(r"^Bearer (\S+)$", re.IGNORECASE)
 REASON = "fixture regression: challenger composite 0.400000 < champion 0.900000"
 METRICS = {"delta": -0.5, "fixture_set": "f" * 64, "tolerance": 0.01}
@@ -45,49 +41,14 @@ def source_id(n: int) -> str:
     return hashlib.sha256(f"source-{n}".encode()).hexdigest()
 
 
-def segment_id(n: int) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"turnip-test/segment/{n}"))
-
-
 def ids(count: int) -> list[str]:
-    """Segment ids; segments 2k and 2k+1 are cut from source k (LINKS)."""
-    return [segment_id(n) for n in range(count)]
-
-
-# segment_sources as the fake farm holds it: two segments per source.
-LINKS = {segment_id(n): source_id(n // 2) for n in range(2 * 10000 + 2)}
+    return [source_id(n) for n in range(count)]
 
 
 def rows(
-    segments: list[str], reason: str = REASON, metrics: Any = METRICS
+    sources: list[str], reason: str = REASON, metrics: Any = METRICS
 ) -> list[dict[str, Any]]:
-    return fixture_gate.quarantine_rows(segments, reason, metrics)
-
-
-SUMMARY = re.compile(
-    r"report_quarantine: (\d+) segments in (\d+) request\(s\): (\d+) sources "
-    r"quarantined, (\d+) already open; (\d+) segments unlinked "
-)
-
-
-def totals(stdout: str) -> dict[str, int]:
-    """The last summary line's counts, compared whole (never as substrings)."""
-    found = SUMMARY.findall(stdout)
-    assert found, f"no summary line in {stdout!r}"
-    keys = ("segments", "requests", "quarantined", "open", "unlinked")
-    return dict(zip(keys, map(int, found[-1]), strict=True))
-
-
-def counts(
-    segments: int, requests: int, quarantined: int, open: int, unlinked: int = 0
-) -> dict[str, int]:
-    return {
-        "segments": segments,
-        "requests": requests,
-        "quarantined": quarantined,
-        "open": open,
-        "unlinked": unlinked,
-    }
+    return fixture_gate.quarantine_rows(sources, reason, metrics)
 
 
 CODES = {401: "UNAUTHENTICATED", 404: "NOT_FOUND", 422: "VALIDATION_ERROR"}
@@ -112,18 +73,11 @@ def farm_validation_error(body: Any) -> str | None:
     """turnip-farm src/quarantine.ts readQuarantineInput, rule for rule."""
     if not isinstance(body, dict):
         return "body must be a JSON object"
-    lists = {"source_ids": HEX64, "segment_ids": UUID}
-    for key, pattern in lists.items():
-        if key not in body:
-            continue
-        values = body[key]
-        if not isinstance(values, list) or len(values) > 10000:
-            return f"{key} must be an array of at most 10000 ids"
-        if not all(isinstance(i, str) and pattern.fullmatch(i) for i in values):
-            return f"{key} holds a malformed id"
-    if not any(body.get(key) for key in lists):
-        return "source_ids or segment_ids must be non-empty"
-    reason = body.get("reason")
+    source_ids, reason = body.get("source_ids"), body.get("reason")
+    if not isinstance(source_ids, list) or not 0 < len(source_ids) <= 10000:
+        return "source_ids must be a non-empty array"
+    if not all(isinstance(i, str) and HEX64.fullmatch(i) for i in source_ids):
+        return "source_ids must be 64-char lowercase hex video ids"
     if not isinstance(reason, str) or not reason.strip() or js_length(reason) > 1000:
         return "reason must be a non-empty string"
     metrics = body.get("metrics")
@@ -135,10 +89,9 @@ def farm_validation_error(body: Any) -> str | None:
 class FakeFarm:
     """POST /api/quarantine as turnip-farm serves it."""
 
-    def __init__(self, deleted: list[str] | None = None):
-        # segment_sources, less the segments deleted since the export pull.
-        self.links = {k: v for k, v in LINKS.items() if k not in set(deleted or [])}
-        # Open quarantines, by source id.
+    def __init__(self, known: list[str] | None = None):
+        # Sources the farm still has; None means every well-formed id.
+        self.known = None if known is None else set(known)
         self.open: dict[str, tuple[str, Any]] = {}
         self.posts: list[dict[str, Any]] = []
         self.calls = 0
@@ -162,7 +115,7 @@ class FakeFarm:
             return error(401)
         if self.fail:
             # A 422's details name the offending id, as the farm's do.
-            return error(self.fail.pop(0), id=segment_id(0))
+            return error(self.fail.pop(0), id=source_id(0))
         if self.down_after is not None and len(self.posts) >= self.down_after:
             return error(503)
         try:
@@ -171,25 +124,22 @@ class FakeFarm:
             return error(422)
         if farm_validation_error(payload):
             return error(422)
-        if set(payload) != {"segment_ids", "reason", "metrics"}:
-            raise AssertionError(f"unexpected keys sent: {set(payload)}")
+        if set(payload) - {"source_ids", "reason", "metrics"}:
+            raise AssertionError(f"unknown keys sent: {set(payload)}")
         self.posts.append(payload)
-        # source_ids fill the lists; this pipeline sends segment_ids only.
-        answer: dict[str, Any] = {"quarantined": [], "already_open": [], "unknown": []}
-        segments = list(dict.fromkeys(payload["segment_ids"]))
-        sources = {self.links[s] for s in segments if s in self.links}
-        counts = {
-            "sources_quarantined": 0,
-            "sources_already_open": 0,
-            "unlinked": sum(1 for s in segments if s not in self.links),
+        answer: dict[str, list[str]] = {
+            "quarantined": [],
+            "already_open": [],
+            "unknown": [],
         }
-        for sid in sorted(sources):
-            if sid in self.open:
-                counts["sources_already_open"] += 1
+        for sid in dict.fromkeys(payload["source_ids"]):
+            if self.known is not None and sid not in self.known:
+                answer["unknown"].append(sid)
+            elif sid in self.open:
+                answer["already_open"].append(sid)
             else:
                 self.open[sid] = (payload["reason"].strip(), payload.get("metrics"))
-                counts["sources_quarantined"] += 1
-        answer["segments"] = counts
+                answer["quarantined"].append(sid)
         if self.drop_next_answer:
             self.drop_next_answer = False
             raise report_quarantine.Transient("farm request failed: TimeoutError")
@@ -233,24 +183,24 @@ class ReportTestCase(unittest.TestCase):
     def assertLogsArePrivate(self) -> None:
         logs = self.logs()
         self.assertIsNone(HEX64.search(logs), "a source id reached the log")
-        self.assertIsNone(UUID.search(logs), "a segment id reached the log")
         for secret in (KEY, FARM, "farm says"):
             self.assertNotIn(secret, logs)
 
 
 class RoundTripTest(ReportTestCase):
     def test_rows_become_one_request(self) -> None:
-        segments = ids(3)
-        self.write(rows(segments))
+        sources = ids(3)
+        self.write(rows(sources))
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
         self.assertEqual(len(self.farm.posts), 1)
         self.assertEqual(
             self.farm.posts[0],
-            {"segment_ids": sorted(segments), "reason": REASON, "metrics": METRICS},
+            {"source_ids": sorted(sources), "reason": REASON, "metrics": METRICS},
         )
-        # Segments 0 and 1 share source 0; segment 2 is source 1's.
-        self.assertEqual(set(self.farm.open), {source_id(0), source_id(1)})
-        self.assertEqual(totals(self.stdout.getvalue()), counts(3, 1, 2, 0))
+        self.assertEqual(set(self.farm.open), set(sources))
+        self.assertIn(
+            "3 sources in 1 request(s): 3 quarantined", self.stdout.getvalue()
+        )
         self.assertLogsArePrivate()
 
     def test_the_gates_own_output_is_sent(self) -> None:
@@ -281,65 +231,54 @@ class RoundTripTest(ReportTestCase):
         self.assertEqual(code, fixture_gate.EXIT_REGRESSION)
         self.path = out / fixture_gate.QUARANTINE_FILE
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
-        self.assertEqual(set(self.farm.open), {source_id(0), source_id(1)})
+        self.assertEqual(set(self.farm.open), set(ids(4)))
         reason, metrics = self.farm.open[source_id(0)]
         self.assertTrue(reason.startswith("fixture regression"))
         self.assertEqual(metrics["delta"], -0.5)
 
     def test_chunks_at_the_farms_limit(self) -> None:
-        segments = ids(2 * report_quarantine.MAX_SEGMENT_IDS + 1)
-        self.write(rows(segments))
+        sources = ids(2 * report_quarantine.MAX_SOURCE_IDS + 1)
+        self.write(rows(sources))
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
-        sent = [post["segment_ids"] for post in self.farm.posts]
+        sent = [post["source_ids"] for post in self.farm.posts]
         self.assertEqual([len(chunk) for chunk in sent], [10000, 10000, 1])
-        self.assertEqual([i for chunk in sent for i in chunk], sorted(segments))
-        self.assertEqual(set(self.farm.open), {LINKS[s] for s in segments})
-        # A source whose two segments straddle a chunk boundary is newly
-        # quarantined by one body and already open for the next.
-        seen: set[str] = set()
-        straddling = 0
-        for chunk in sent:
-            chunk_sources = {LINKS[s] for s in chunk}
-            straddling += len(chunk_sources & seen)
-            seen |= chunk_sources
-        self.assertGreater(straddling, 0)
-        self.assertEqual(
-            totals(self.stdout.getvalue()), counts(20001, 3, len(seen), straddling)
-        )
+        self.assertEqual([i for chunk in sent for i in chunk], sorted(sources))
+        self.assertEqual(len(self.farm.open), len(sources))
+        self.assertIn("20001 sources in 3 request(s)", self.stdout.getvalue())
 
     def test_a_full_chunk_is_one_request(self) -> None:
-        self.write(rows(ids(report_quarantine.MAX_SEGMENT_IDS)))
+        self.write(rows(ids(report_quarantine.MAX_SOURCE_IDS)))
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
         self.assertEqual(len(self.farm.posts), 1)
 
     def test_each_reason_and_metrics_gets_its_own_body(self) -> None:
-        segments = ids(6)
+        sources = ids(6)
         self.write(
-            rows(segments[:2])
-            + rows(segments[2:4], reason="another reason")
-            + rows(segments[4:], metrics=None)
+            rows(sources[:2])
+            + rows(sources[2:4], reason="another reason")
+            + rows(sources[4:], metrics=None)
         )
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
         bodies = sorted(
-            (p["reason"], json.dumps(p["metrics"]), p["segment_ids"])
+            (p["reason"], json.dumps(p["metrics"]), p["source_ids"])
             for p in self.farm.posts
         )
         self.assertEqual(
             bodies,
             sorted(
                 [
-                    (REASON, json.dumps(METRICS), sorted(segments[:2])),
-                    ("another reason", json.dumps(METRICS), sorted(segments[2:4])),
-                    (REASON, "null", sorted(segments[4:])),
+                    (REASON, json.dumps(METRICS), sorted(sources[:2])),
+                    ("another reason", json.dumps(METRICS), sorted(sources[2:4])),
+                    (REASON, "null", sorted(sources[4:])),
                 ]
             ),
         )
 
     def test_requests_are_deterministic(self) -> None:
-        segments = ids(5)
-        self.write(list(reversed(rows(segments))))
+        sources = ids(5)
+        self.write(list(reversed(rows(sources))))
         first = report_quarantine.build_requests(report_quarantine.load_rows(self.path))
-        self.write(rows(segments))
+        self.write(rows(sources))
         again = report_quarantine.build_requests(report_quarantine.load_rows(self.path))
         self.assertEqual(first, again)
 
@@ -350,47 +289,33 @@ class RoundTripTest(ReportTestCase):
         self.assertEqual(self.farm.calls, 0)
         self.assertIn("nothing to quarantine", self.stdout.getvalue())
 
-    def test_unlinked_segments_are_reported_not_fatal(self) -> None:
-        segments = ids(4)
-        self.write(rows(segments))
-        # Segment 2 was deleted since the pull; segment 3 still links source 1.
-        farm = FakeFarm(deleted=segments[2:3])
+    def test_unknown_sources_are_reported_not_fatal(self) -> None:
+        sources = ids(3)
+        self.write(rows(sources))
+        farm = FakeFarm(known=sources[:2])
         self.assertEqual(self.main(farm), 0, self.stderr.getvalue())
-        self.assertEqual(totals(self.stdout.getvalue()), counts(4, 1, 2, 0, 1))
-
-    def test_every_segment_unlinked_is_not_fatal(self) -> None:
-        segments = ids(2)
-        self.write(rows(segments))
-        farm = FakeFarm(deleted=segments)
-        self.assertEqual(self.main(farm), 0, self.stderr.getvalue())
-        self.assertEqual(farm.open, {})
-        self.assertEqual(totals(self.stdout.getvalue()), counts(2, 1, 0, 0, 2))
-
-    def test_a_source_split_across_bodies_counts_once_per_body(self) -> None:
-        segments = ids(2)  # both cut from source 0
-        self.write(rows(segments[:1]) + rows(segments[1:], reason="another reason"))
-        self.assertEqual(self.main(), 0, self.stderr.getvalue())
-        self.assertEqual(set(self.farm.open), {source_id(0)})
-        self.assertEqual(totals(self.stdout.getvalue()), counts(2, 2, 1, 1))
+        self.assertIn(
+            "2 quarantined, 0 already open, 1 unknown", self.stdout.getvalue()
+        )
 
 
 class IdempotenceTest(ReportTestCase):
     def test_resubmission_changes_nothing(self) -> None:
-        self.write(rows(ids(4)))
+        sources = ids(4)
+        self.write(rows(sources))
         self.assertEqual(self.main(), 0)
         before = dict(self.farm.open)
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
         self.assertEqual(self.farm.open, before)
-        self.assertEqual(totals(self.stdout.getvalue()), counts(4, 1, 0, 2))
+        self.assertIn("0 quarantined, 4 already open", self.stdout.getvalue())
 
     def test_a_rerun_after_a_failed_chunk_finishes_the_job(self) -> None:
-        segments = ids(report_quarantine.MAX_SEGMENT_IDS + 1)
-        self.write(rows(segments))
+        sources = ids(report_quarantine.MAX_SOURCE_IDS + 1)
+        self.write(rows(sources))
         # The first chunk lands; the second fails on every try.
         self.farm.down_after = 1
         self.assertEqual(self.main(), 2)
-        first = {LINKS[s] for s in self.farm.posts[0]["segment_ids"]}
-        self.assertEqual(set(self.farm.open), first)
+        self.assertEqual(len(self.farm.open), report_quarantine.MAX_SOURCE_IDS)
         self.assertIn(
             "HTTP 503 INTERNAL (request 2 of 2; 1 sent", self.stderr.getvalue()
         )
@@ -398,35 +323,30 @@ class IdempotenceTest(ReportTestCase):
         self.farm.down_after = None
         self.clear_logs()
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
-        self.assertEqual(set(self.farm.open), {LINKS[s] for s in segments})
-        # The rerun resends the first chunk, whose sources are all open
-        # already; the second chunk's segment may share one of them.
-        second = {LINKS[s] for s in self.farm.posts[-1]["segment_ids"]}
-        self.assertEqual(
-            totals(self.stdout.getvalue()),
-            counts(10001, 2, len(second - first), len(first) + len(second & first)),
-        )
+        self.assertEqual(set(self.farm.open), set(sources))
+        self.assertIn("1 quarantined, 10000 already open", self.stdout.getvalue())
 
     def test_a_lost_answer_is_retried_into_already_open(self) -> None:
-        self.write(rows(ids(3)))
+        sources = ids(3)
+        self.write(rows(sources))
         self.farm.drop_next_answer = True
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
         self.assertEqual(len(self.farm.posts), 2)
         self.assertEqual(self.sleeps, [report_quarantine.RETRY_DELAYS_S[0]])
-        self.assertEqual(totals(self.stdout.getvalue()), counts(3, 1, 0, 2))
+        self.assertIn("0 quarantined, 3 already open", self.stdout.getvalue())
         self.assertIn("TimeoutError (try 1 of 3); retrying", self.stderr.getvalue())
 
 
 class FailureTest(ReportTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.segments = ids(3)
-        self.write(rows(self.segments))
+        self.sources = ids(3)
+        self.write(rows(self.sources))
 
     def test_5xx_is_retried(self) -> None:
         self.farm.fail = [503]
         self.assertEqual(self.main(), 0, self.stderr.getvalue())
-        self.assertEqual(set(self.farm.open), {LINKS[s] for s in self.segments})
+        self.assertEqual(set(self.farm.open), set(self.sources))
         self.assertEqual(self.sleeps, [10.0])
 
     def test_5xx_on_every_try_is_an_error(self) -> None:
@@ -467,7 +387,7 @@ class FailureTest(ReportTestCase):
         def odd(
             method: str, url: str, headers: dict[str, str], body: bytes | None
         ) -> tuple[int, Any]:
-            return 400, {"error": {"code": f"BAD {segment_id(0)}"}}
+            return 400, {"error": {"code": f"BAD {source_id(0)}"}}
 
         code = report_quarantine.main(
             ["--quarantine", str(self.path)], transport=odd, sleep=self.sleeps.append
@@ -476,26 +396,18 @@ class FailureTest(ReportTestCase):
         self.assertIn("HTTP 400 (request 1 of 1", self.stderr.getvalue())
         self.assertLogsArePrivate()
 
-    def test_an_inconsistent_answer_is_an_error(self) -> None:
-        # The good answer for segments 0-2: 2 sources quarantined, 0 unlinked.
-        def counts(**changed: Any) -> Any:
-            return lambda a: {**a, "segments": {**a["segments"], **changed}}
-
+    def test_an_answer_that_misses_an_id_is_an_error(self) -> None:
         cases = {
-            "names a source": lambda a: {**a, "quarantined": [source_id(0)]},
-            "names an unknown": lambda a: {**a, "unknown": [segment_id(0)]},
-            "lacks a list": lambda a: {k: v for k, v in a.items() if k != "unknown"},
-            "lacks the counts": lambda a: {
-                k: v for k, v in a.items() if k != "segments"
+            "drops one": lambda a: {**a, "quarantined": a["quarantined"][1:]},
+            "repeats one": lambda a: {
+                **a,
+                "already_open": a["quarantined"][:1],
             },
-            "lacks a count": lambda a: {**a, "segments": {"unlinked": 0}},
-            "a negative count": counts(sources_already_open=-1),
-            "a boolean count": counts(unlinked=False),
-            "a float count": counts(sources_quarantined=2.0),
-            "more unlinked than sent": counts(unlinked=4),
-            "more sources than linked": counts(sources_already_open=2),
-            "no source for linked segments": counts(sources_quarantined=0),
-            "a source for no linked segment": counts(unlinked=3),
+            "names a stranger": lambda a: {
+                **a,
+                "quarantined": [*a["quarantined"][1:], "e" * 64],
+            },
+            "lacks a list": lambda a: {"quarantined": a["quarantined"]},
             "not an object": lambda a: [a],
             "empty": lambda a: None,
         }
@@ -532,7 +444,6 @@ class RefusalTest(ReportTestCase):
         self.assertEqual(self.farm.calls, 0)
         self.assertIn(message, self.stderr.getvalue())
         self.assertIsNone(HEX64.search(self.logs()))
-        self.assertIsNone(UUID.search(self.logs()))
 
     def test_malformed_rows_are_refused_before_any_request(self) -> None:
         good = rows(ids(2))
@@ -543,37 +454,25 @@ class RefusalTest(ReportTestCase):
                 "row 1 must have exactly the keys",
             ),
             "a key missing": (
-                [{"segment_id": segment_id(0), "reason": REASON}],
+                [{"source_id": source_id(0), "reason": REASON}],
                 "row 0 must have exactly the keys",
             ),
-            "the old source_id key": (
-                [{"source_id": source_id(0), "reason": REASON, "metrics": None}],
-                "row 0 must have exactly the keys",
-            ),
-            "a listed twice segment": ([good[0], good[1], good[0]], "listed twice"),
+            "a listed twice source": ([good[0], good[1], good[0]], "listed twice"),
             "an empty reason": ([{**good[0], "reason": "  "}], "row 0: reason"),
             "a long reason": ([{**good[0], "reason": "x" * 1001}], "row 0: reason"),
             "a list of metrics": ([{**good[0], "metrics": [1]}], "row 0: metrics"),
             "an uppercase id": (
-                [{**good[0], "segment_id": segment_id(0).upper()}],
-                "row 0: segment_id",
-            ),
-            "a source id": (
-                [{**good[0], "segment_id": source_id(0)}],
-                "row 0: segment_id",
-            ),
-            "a braced uuid": (
-                [{**good[0], "segment_id": "{" + segment_id(0) + "}"}],
-                "row 0: segment_id",
+                [{**good[0], "source_id": source_id(0).upper()}],
+                "row 0: source_id",
             ),
         }
         for name, (data, message) in cases.items():
             with self.subTest(name):
                 self.assertRefused(data, message)
 
-    def test_synthetic_ids_never_reach_the_farm(self) -> None:
-        # The synthetic rehearsal's ids (make_smoke_fixture.py).
-        self.assertRefused(rows(["source-a", "source-b"]), "row 0: segment_id")
+    def test_synthetic_source_ids_never_reach_the_farm(self) -> None:
+        # The synthetic rehearsal's sources (make_smoke_fixture.py).
+        self.assertRefused(rows(["source-a", "source-b"]), "row 0: source_id")
 
     def test_reason_length_is_counted_as_the_farm_counts_it(self) -> None:
         # U+1F6F9 (skateboard) is two UTF-16 code units in JavaScript.
@@ -637,10 +536,10 @@ class HttpTransportTest(ReportTestCase):
             )
 
     def test_quarantine_over_http(self) -> None:
-        segments = ids(report_quarantine.MAX_SEGMENT_IDS + 1)
-        self.write(rows(segments))
+        sources = ids(report_quarantine.MAX_SOURCE_IDS + 1)
+        self.write(rows(sources))
         self.assertEqual(self.main_at(self.serve(self.farm)), 0, self.stderr.getvalue())
-        self.assertEqual(set(self.farm.open), {LINKS[s] for s in segments})
+        self.assertEqual(set(self.farm.open), set(sources))
         self.assertEqual(len(self.farm.posts), 2)
 
     def test_a_non_json_5xx_is_retried(self) -> None:

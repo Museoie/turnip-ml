@@ -136,6 +136,46 @@ class TrainTest(unittest.TestCase):
         p.write_text("seed = 0\nbogus_key = 1\n", encoding="utf-8")
         self.assertEqual(self._run(config=p), 2)
 
+    def test_durations_convert_from_seconds_at_10_hz(self) -> None:
+        cfg = train.load_config(SMOKE_CONFIG)
+        self.assertEqual(train.window_params(cfg), (8, 4, 20))
+        cfg = train.load_config(REPO_ROOT / "Training" / "config" / "pipeline.toml")
+        self.assertEqual(train.window_params(cfg), (16, 8, 20))
+        # The checkpoint records frames, as the model contract reads them.
+        self.assertEqual(self._run(), 0)
+        ckpt = np.load(self.out / "model.npz")
+        self.assertEqual(
+            (
+                int(ckpt["window_frames"]),
+                int(ckpt["window_stride"]),
+                int(ckpt["background_margin_frames"]),
+            ),
+            (8, 4, 20),
+        )
+
+    def test_a_duration_that_is_not_whole_frames_fails_closed(self) -> None:
+        for old, new in (
+            ("window_seconds = 0.8", "window_seconds = 0.85"),
+            ("window_stride_seconds = 0.4", "window_stride_seconds = 0.45"),
+            ("background_margin_seconds = 2.0", "background_margin_seconds = 2.05"),
+        ):
+            with self.subTest(new=new):
+                p = self._rewrite_config(old, new)
+                with self.assertRaisesRegex(ValueError, "whole number of frames"):
+                    train.load_config(p)
+                self.assertEqual(self._run(config=p), 2)
+
+    def test_a_non_positive_window_fails_closed(self) -> None:
+        for old, new in (
+            ("window_seconds = 0.8", "window_seconds = 0"),
+            ("window_stride_seconds = 0.4", "window_stride_seconds = -0.4"),
+        ):
+            with (
+                self.subTest(new=new),
+                self.assertRaisesRegex(ValueError, "must be positive"),
+            ):
+                train.load_config(self._rewrite_config(old, new))
+
     def test_gpu_compute_fails_closed(self) -> None:
         p = self._rewrite_config('compute = "cpu"', 'compute = "gpu"')
         self.assertEqual(self._run(config=p), 2)
@@ -237,7 +277,7 @@ class TrainTest(unittest.TestCase):
         # they never enter the background pool.
         sample = {
             "sample_id": "s",
-            "keypoints": np.zeros((200, 13, 3)),
+            "keypoints": np.zeros((200, 17, 3)),
             "tricks": [
                 {
                     "clip_id": "c1",
@@ -256,53 +296,49 @@ class TrainTest(unittest.TestCase):
             [],
         )
 
-    def test_window_features_ignore_where_the_sequence_is_centered(self) -> None:
-        # The farm centers on the segment, the client on the take: a constant
-        # shift of every present joint must not change a window's features
-        # (MODEL_CONTRACT.md §3.6.2), missing joints and gap frames included.
-        rng = np.random.default_rng(0)
-        window = np.concatenate(
-            [rng.normal(size=(8, 13, 2)), np.full((8, 13, 1), 0.9)], axis=2
-        )
-        window[2] = 0.0  # a gap frame
-        window[5, 3] = 0.0  # a missing elbow
-        window[6, 7] = 0.0  # a missing hip: no root in this frame
-        shifted = window.copy()
-        present = shifted[:, :, 2] > 0
-        shifted[:, :, 0][present] += 3.25
-        shifted[:, :, 1][present] -= 1.5
-        a = train.featurize_window(np, window)
-        b = train.featurize_window(np, shifted)
-        self.assertEqual(a.shape, (52,))
-        np.testing.assert_allclose(a, b, atol=1e-12)
+    def test_build_dataset_drops_held_back_windows(self) -> None:
+        # A held-back clip at [96, 112) in a 200-frame sample, 8-frame
+        # windows at stride 8 (25 windows): without a margin, only the 2
+        # that overlap it (starts 96, 104) drop out; the touching ones at 88
+        # and 112 stay background. Nothing is labeled with its trick.
+        sample = {
+            "sample_id": "s",
+            "keypoints": np.zeros((200, 17, 3)),
+            "tricks": [],
+            "held_back_windows": [[96, 112]],
+        }
+        _, labels, prov = train.build_dataset(np, [sample], 8, 8)
+        self.assertEqual(len(labels), 23)
+        self.assertEqual(set(labels), {"background"})
+        starts = {start for _, start, _ in prov}
+        self.assertTrue(starts.isdisjoint({96, 104}))
+        self.assertTrue({88, 112} <= starts)
+        # With a 20-frame margin, every window less than 20 frames away goes
+        # too (starts 72 to 128), as around a trained segment; 64 and 136,
+        # 24 frames away, stay.
+        _, labels, prov = train.build_dataset(np, [sample], 8, 8, margin_frames=20)
+        self.assertEqual(len(labels), 17)
+        starts = {start for _, start, _ in prov}
+        self.assertTrue(starts.isdisjoint(range(72, 129, 8)))
+        self.assertTrue({64, 136} <= starts)
 
-    def test_window_features_by_hand(self) -> None:
-        # Two frames, the hips at (+-0.2, 0) then (+-0.2, 1): the root moves
-        # down by 1. The head sits 1 above the root in both frames.
-        window = np.zeros((2, 13, 3))
-        for f, y in enumerate((0.0, 1.0)):
-            window[f, 7] = [0.2, y, 1.0]
-            window[f, 8] = [-0.2, y, 1.0]
-            window[f, 0] = [0.0, y - 1.0, 1.0]
-        window[1, 0] = 0.0  # ...but the head is missing in frame 1
-        feat = train.featurize_window(np, window)
-        pos, speed = feat[:26].reshape(13, 2), feat[26:].reshape(13, 2)
-        # Root = mean hip midpoint = (0, 0.5). The head is present in one of
-        # two frames, at (0, -1): (position - root) averaged over 2 frames.
-        np.testing.assert_allclose(pos[0], [0.0, -0.75])
-        np.testing.assert_allclose(pos[7], [0.2, 0.0])
-        # Speed counts only pairs where the joint is present in both frames:
-        # the hips moved by 1 in y; the head has no such pair.
-        np.testing.assert_allclose(speed[7], [0.0, 1.0])
-        np.testing.assert_allclose(speed[0], [0.0, 0.0])
-        # A missing joint is all zeros.
-        np.testing.assert_allclose(pos[3], [0.0, 0.0])
+    def test_held_back_windows_drop_trick_windows_too(self) -> None:
+        # A trained segment overlapping a held-back clip loses those windows.
+        sample = {
+            "sample_id": "s",
+            "keypoints": np.zeros((32, 17, 3)),
+            "tricks": [{"name": "gainer", "start_frame": 0, "end_frame": 32}],
+            "held_back_windows": [[16, 24]],
+        }
+        _, labels, prov = train.build_dataset(np, [sample], 8, 8)
+        self.assertEqual([start for _, start, _ in prov], [0, 8, 24])
+        self.assertEqual(labels, ["gainer"] * 3)
 
-    def test_a_window_without_hips_has_no_root(self) -> None:
-        window = np.zeros((4, 13, 3))
-        window[:, 0] = [0.5, -1.0, 1.0]  # only the head is seen
-        pos = train.featurize_window(np, window)[:26].reshape(13, 2)
-        np.testing.assert_allclose(pos[0], [0.5, -1.0])
+    def test_malformed_held_back_windows_fail_closed(self) -> None:
+        for bad in ({"a": 1}, [[5]], [[5, 5]], [[-1, 4]], [[0, 4.0]], [[True, 4]]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                train.held_back_windows({"sample_id": "s", "held_back_windows": bad})
+        self.assertEqual(train.held_back_windows({"sample_id": "s"}), [])
 
     def test_window_label_counts_each_name_once(self) -> None:
         # Two clips labeling overlapping spans "gainer": the window is
@@ -326,7 +362,7 @@ class TrainTest(unittest.TestCase):
         [(_, _, names)] = evaluate.ground_truth_segments(tricks, "test")
         sample = {
             "sample_id": "s",
-            "keypoints": np.zeros((16, 13, 3)),
+            "keypoints": np.zeros((16, 17, 3)),
             "tricks": tricks,
         }
         _, labels, _ = train.build_dataset(np, [sample], 8, 8)
@@ -339,7 +375,7 @@ class TrainTest(unittest.TestCase):
         ]
         sample = {
             "sample_id": "s",
-            "keypoints": np.zeros((16, 13, 3)),
+            "keypoints": np.zeros((16, 17, 3)),
             "tricks": tricks,
         }
         with self.assertRaises(ValueError):

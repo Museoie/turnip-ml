@@ -5,18 +5,16 @@ Runs after a challenger is trained and before the holdout evaluation and
 the champion/challenger promotion gate. It compares the challenger's
 fixture scores against the champion's recorded fixture scores; a
 regression means the night's new data is suspect, so the gate alerts,
-quarantines that night's ingested segments (farm-side: the sources they
-were cut from), and skips promotion.
+quarantines that night's ingested sources, and skips promotion.
 
 Inputs
 ------
 --champion    fixture scores recorded for the current champion.
 --challenger  fixture scores for the challenger, from the same fixture set.
---ingested    JSON array of the segment ids new since the last
-              watermark (fetch_dataset.py count --out-segments): the
-              quarantine candidates. Plain id strings (lowercase UUIDs),
-              so nothing account-shaped can ride along (training data
-              carries no account identifier).
+--ingested    JSON array of the source ids ingested since the last
+              watermark: the quarantine candidates. Plain id strings, so
+              nothing account-shaped can ride along (training data carries
+              no account identifier).
 --out         fresh per-run directory; quarantine.json is written here.
 --tolerance   absolute slack on the composite score. Default: 0.01.
 --registry    model-registry stand-in: a JSON array file each decision
@@ -42,15 +40,15 @@ Decision rule
     composite  = mean(segment_iou, name_accuracy)
     regression iff challenger_composite < champion_composite - tolerance
 On regression:
-  - quarantine.json: one row per ingested segment (segment_id, reason,
-    metrics). report_quarantine.py sends the rows (the workflow's farm
-    job only); the farm resolves each segment to its source and opens
-    one `data_quarantine` row per source. No account id: who uploaded a
-    source is read farm-side from source_attribution while it exists.
+  - quarantine.json: one row per ingested source, shaped like a
+    `data_quarantine` insert (source_id, reason, metrics); the farm
+    assigns id and quarantined_at. No account id: who uploaded a source
+    is read farm-side from source_attribution while it exists.
+    report_quarantine.py sends the rows (the workflow's farm job only).
   - Discord alert (webhook from TURNIP_DISCORD_WEBHOOK_URL) with the
-    metrics delta and the number of segments quarantined: counts only,
-    never segment, source or account ids (a Discord message outlives
-    the farm's 30-day attribution window and every deletion).
+    metrics delta and the number of sources quarantined: counts only,
+    never source or account ids (a Discord message outlives every
+    deletion).
   - Exit 3 so the pipeline skips promotion.
 quarantine.json and the registry record (with `alert_status: "pending"`)
 are written before the alert is attempted; the record is then updated
@@ -68,7 +66,7 @@ Determinism
 The decision, the alert text and quarantine.json are pure functions of the
 inputs. quarantine.json is written on every decided run (an empty array
 when nothing is quarantined) with sorted keys and rows sorted by
-segment_id; a run that exits 2 writes nothing, so --out must be a fresh
+source_id; a run that exits 2 writes nothing, so --out must be a fresh
 directory per run for its quarantine.json to be trusted. The registry
 record carries a wall-clock `decided_at` (a registry is a log, not a
 reproducible artifact). Computed floats (components, composites, delta,
@@ -79,7 +77,7 @@ Fail closed
 -----------
 Missing/unreadable files, invalid JSON (including NaN, Infinity and numbers
 that overflow to infinity), a missing, non-numeric or out-of-range score,
-mismatched fixture sets, a malformed ingested-segment list, a non-finite or
+mismatched fixture sets, a malformed ingested-source list, a non-finite or
 negative tolerance, an empty override reason, or a malformed existing
 registry are errors, never silently a pass. All inputs are validated and
 every output is serialized before any side effect (file write, alert).
@@ -111,10 +109,7 @@ QUARANTINE_FILE = "quarantine.json"
 WEBHOOK_ENV = "TURNIP_DISCORD_WEBHOOK_URL"
 
 COMPONENTS = ("segment_iou", "name_accuracy")
-# A lowercase UUID, as the farm mints segment ids (fetch_dataset.is_segment_id).
-SEGMENT_ID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-)
+SOURCE_ID_RE = re.compile(r"[0-9a-f]{64}")
 # Safe inside a Discord code span: no whitespace (no injected lines), no
 # backticks (no breaking out of the span).
 IDENTIFIER_RE = re.compile(r"[^\s`]+")
@@ -191,15 +186,16 @@ def composite(scores: dict[str, Any]) -> float:
 
 
 def load_ingested(path: Path) -> list[str]:
-    """Validated ingested segment ids, deduplicated and sorted."""
-    data = load_json(path, "ingested segments")
+    """Validated ingested source ids, deduplicated and sorted."""
+    data = load_json(path, "ingested sources")
     if not isinstance(data, list):
-        raise GateError(f"ingested segments file {path} must contain a JSON array")
-    for i, segment_id in enumerate(data):
+        raise GateError(f"ingested sources file {path} must contain a JSON array")
+    for i, source_id in enumerate(data):
         # Only bare ids: an object entry could carry an account id along.
-        if not isinstance(segment_id, str) or not SEGMENT_ID_RE.fullmatch(segment_id):
+        if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
             raise GateError(
-                f"ingested entry {i} in {path} must be a segment id (a lowercase UUID)"
+                f"ingested entry {i} in {path} must be a source id of 64 "
+                "lowercase hex chars"
             )
     return sorted(set(data))
 
@@ -254,8 +250,8 @@ def quarantine_rows(
     ingested: list[str], reason: str, metrics: dict[str, Any]
 ) -> list[dict[str, Any]]:
     return [
-        {"segment_id": segment_id, "reason": reason, "metrics": metrics}
-        for segment_id in ingested
+        {"source_id": source_id, "reason": reason, "metrics": metrics}
+        for source_id in ingested
     ]
 
 
@@ -274,10 +270,7 @@ def alert_content(metrics: dict[str, Any], quarantined: int) -> str:
             f"{n}: {champ[n]:.6f} -> {chall[n]:.6f} (delta {chall[n] - champ[n]:+.6f})"
             for n in COMPONENTS
         ),
-        (
-            f"quarantining the sources of {quarantined} new segment(s); "
-            f"ids in {QUARANTINE_FILE} (run record)"
-        ),
+        f"quarantining {quarantined} source(s); ids in {QUARANTINE_FILE} (run record)",
     ]
     content = "\n".join(lines)
     if len(content) > DISCORD_MAX_CONTENT:
@@ -406,7 +399,7 @@ def run(
         "metrics": metrics,
         "champion_scores": champion,
         "challenger_scores": challenger,
-        "quarantined_segments": len(rows),
+        "quarantined_sources": len(rows),
         "alert_status": "pending" if decision == "regression" else "not-needed",
     }
     # Serialize everything up front: from here on only I/O can fail.
@@ -443,7 +436,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--ingested",
         required=True,
         type=Path,
-        help="JSON array of segment ids new since the watermark",
+        help="JSON array of source ids ingested since the watermark",
     )
     p.add_argument(
         "--out",

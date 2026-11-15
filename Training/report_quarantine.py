@@ -2,17 +2,16 @@
 """Send the fixture gate's quarantine rows to the farm: POST /api/quarantine.
 
 turnip-ml#51, docs/TRAINING_DESIGN.md §7 step 2. On a fixture regression
-fixture_gate.py writes quarantine.json, one row per segment the farm job
-listed as new since the watermark. This sends those segment ids; the
-farm resolves each to the source it was cut from and puts that source
-under an open quarantine, so the export leaves every segment of it out
-until the maintainer releases or purges it (farm master plan §6). The workflow's farm job runs it after a regression
+fixture_gate.py writes quarantine.json, one row per source changed since
+the watermark. This puts those sources under an open quarantine farm-side,
+so the export leaves them out until the maintainer releases or purges them
+(farm master plan §6). The workflow's farm job runs it after a regression
 and advances the watermark only once it succeeds; nothing else sends.
 
 Inputs
 ------
 --quarantine FILE   the gate's quarantine.json: a JSON array of
-                    {"segment_id", "reason", "metrics"} rows.
+                    {"source_id", "reason", "metrics"} rows.
 
 Environment (never argv: values would land in process lists and CI logs)
 -----------
@@ -21,31 +20,22 @@ TURNIP_FARM_URL, TURNIP_PIPELINE_KEY   the farm and its service key
 Requests
 --------
 Every row is validated and every body serialized before the first
-request, so a malformed file sends nothing. A row has exactly segment_id
-(a farm segment id: a lowercase UUID), reason (non-empty, at most 1000
+request, so a malformed file sends nothing. A row has exactly source_id
+(a farm source id: 64 lowercase hex), reason (non-empty, at most 1000
 characters) and metrics (an object or null), the rules of the farm's
 readQuarantineInput (turnip-farm src/quarantine.ts). Any other key is
-refused, so nothing account-shaped can ride along, and so is a segment
-listed twice. A source id (64 hex) is refused too: the gate only ever
-lists segments, and the synthetic job's ids are neither. Rows sharing a
-reason and metrics go in one body {segment_ids, reason, metrics}, ids
-sorted, at most 10000 per body (the farm's limit); bodies go out in a
-fixed order. An empty array sends nothing.
+refused, so nothing account-shaped can ride along, and so is a source
+listed twice. Rows sharing a reason and metrics go in one body
+{source_ids, reason, metrics}, ids sorted, at most 10000 per body (the
+farm's limit); bodies go out in a fixed order. An empty array sends
+nothing.
 
-The answer
-----------
-The farm answers {quarantined, already_open, unknown, segments}. The
-three lists name source ids sent as source_ids, so with segment_ids
-alone they must be empty. segments holds counts only, never the sources
-behind the segments: sources_quarantined (sources newly under
-quarantine), sources_already_open (sources quarantined before: the farm
-keeps one open row per source, so a resubmission is a no-op and a re-run
-after a failure is safe) and unlinked (segments that resolved to no
-source: de-linked by an account deletion, or re-cut or deleted since the
-export pull, so there is nothing left to quarantine). A body counts as sent only when the answer
-is consistent with what was sent: unlinked at most the segments sent;
-the two source counts at most the linked segments (several segments can
-share a source), and at least one source when any segment linked.
+A body counts as sent only when the farm answers 2xx with
+{quarantined, already_open, unknown} accounting for every id it was
+sent, each exactly once. already_open ids were quarantined before: the
+farm keeps one open row per source, so a resubmission is a no-op and a
+re-run after a failure is safe. unknown ids were deleted by their owner
+after the export pull; there is nothing left to quarantine.
 
 Failure
 -------
@@ -53,7 +43,7 @@ A transport failure or a 5xx is retried, up to ATTEMPTS tries in all
 (the farm may have committed before the answer was lost; the retry then
 answers already_open). Any other answer that is not 2xx (401: fix the
 pipeline key; 422: the body broke the farm's rules; a 3xx) fails at once,
-and so does a 2xx whose answer is inconsistent with the ids sent. The first body
+and so does a 2xx that does not account for the ids sent. The first body
 that fails stops the run; the ones before it stay sent, and a re-run
 sends them again harmlessly. Requests never follow a redirect: one would
 carry the pipeline key to another host.
@@ -62,8 +52,8 @@ Exit codes: 0 = every body sent (or nothing to send), 2 = error (fail
 closed: the workflow then keeps the watermark held).
 
 Privacy: stdout and stderr carry counts, HTTP statuses and farm error
-codes only, never URLs, keys, segment or source ids or the farm's error
-messages (a 422's details name the offending id).
+codes only, never URLs, keys, source ids or the farm's error messages
+(a 422's details name the offending id).
 """
 
 from __future__ import annotations
@@ -83,10 +73,10 @@ from typing import Any
 
 from fetch_dataset import (
     FARM_URL_ENV,
+    HEX64_RE,
     PIPELINE_KEY_ENV,
     farm_url_allowed,
     farm_urlopen,
-    is_segment_id,
 )
 
 EXIT_OK = 0
@@ -94,16 +84,13 @@ EXIT_ERROR = 2
 
 QUARANTINE_PATH = "/api/quarantine"
 # readQuarantineInput's limits.
-MAX_SEGMENT_IDS = 10000
+MAX_SOURCE_IDS = 10000
 MAX_REASON_LEN = 1000
-ROW_KEYS = frozenset({"segment_id", "reason", "metrics"})
-# Source-id lists in the answer: empty when only segment_ids are sent.
-SOURCE_LIST_KEYS = ("quarantined", "already_open", "unknown")
-# The answer's `segments` counts, the totals report() returns.
-SEGMENT_COUNT_KEYS = ("sources_quarantined", "sources_already_open", "unlinked")
-# The farm resolves and inserts every id of a body in one transaction.
+ROW_KEYS = frozenset({"source_id", "reason", "metrics"})
+ANSWER_KEYS = ("quarantined", "already_open", "unknown")
+# The farm checks and inserts every id of a body in one transaction.
 HTTP_TIMEOUT_S = 120.0
-# The answer carries counts only; the cap guards against a broken farm.
+# The answer lists every id sent back: about 70 bytes each at 10000 ids.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 ATTEMPTS = 3
 RETRY_DELAYS_S = (10.0, 30.0)  # before the second and the third try
@@ -144,16 +131,16 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
     for i, row in enumerate(data):
         if not isinstance(row, dict) or set(row) != ROW_KEYS:
             raise QuarantineError(
-                f"row {i} must have exactly the keys segment_id, reason and metrics"
+                f"row {i} must have exactly the keys source_id, reason and metrics"
             )
-        segment_id, reason, metrics = row["segment_id"], row["reason"], row["metrics"]
-        if not is_segment_id(segment_id):
+        source_id, reason, metrics = row["source_id"], row["reason"], row["metrics"]
+        if not isinstance(source_id, str) or HEX64_RE.fullmatch(source_id) is None:
             raise QuarantineError(
-                f"row {i}: segment_id must be a farm segment id (a lowercase UUID)"
+                f"row {i}: source_id must be a farm source id (64 lowercase hex)"
             )
-        if segment_id in seen:
-            raise QuarantineError(f"row {i}: the segment is listed twice")
-        seen.add(segment_id)
+        if source_id in seen:
+            raise QuarantineError(f"row {i}: the source is listed twice")
+        seen.add(source_id)
         if (
             not isinstance(reason, str)
             or not reason.strip()
@@ -177,19 +164,19 @@ def _encode(data: Any) -> bytes:
 
 
 def build_requests(rows: list[dict[str, Any]]) -> list[tuple[list[str], bytes]]:
-    """(segment ids, serialized body) per request, in a fixed order."""
+    """(source ids, serialized body) per request, in a fixed order."""
     groups: dict[bytes, tuple[str, Any, list[str]]] = {}
     for row in rows:
         key = _encode([row["reason"], row["metrics"]])
         group = groups.setdefault(key, (row["reason"], row["metrics"], []))
-        group[2].append(row["segment_id"])
+        group[2].append(row["source_id"])
     requests = []
     for key in sorted(groups):
         reason, metrics, ids = groups[key]
         ids = sorted(ids)
-        for start in range(0, len(ids), MAX_SEGMENT_IDS):
-            chunk = ids[start : start + MAX_SEGMENT_IDS]
-            body = {"segment_ids": chunk, "reason": reason, "metrics": metrics}
+        for start in range(0, len(ids), MAX_SOURCE_IDS):
+            chunk = ids[start : start + MAX_SOURCE_IDS]
+            body = {"source_ids": chunk, "reason": reason, "metrics": metrics}
             requests.append((chunk, _encode(body)))
     return requests
 
@@ -226,37 +213,23 @@ def _error_code(body: Any) -> str | None:
     return None
 
 
-def _count(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
 def check_answer(sent: list[str], answer: Any) -> dict[str, int]:
-    """The answer's segment counts, once they are consistent with `sent`.
-
-    `sent` holds distinct segment ids (load_rows refuses duplicates).
-    """
-    where = f"POST {QUARANTINE_PATH} answered"
+    """Counts per answer list, once the answer accounts for every id sent."""
     if not isinstance(answer, dict):
-        raise QuarantineError(f"{where} without a JSON object")
-    for key in SOURCE_LIST_KEYS:
+        raise QuarantineError(f"POST {QUARANTINE_PATH} answered without a JSON object")
+    counts: dict[str, int] = {}
+    accounted: list[str] = []
+    for key in ANSWER_KEYS:
         ids = answer.get(key)
-        if not isinstance(ids, list):
-            raise QuarantineError(f"{where} without {key}")
-        if ids:
-            # Only source_ids fill these, and none were sent.
-            raise QuarantineError(f"{where} {len(ids)} {key} source ids for none sent")
-    segments = answer.get("segments")
-    if not isinstance(segments, dict) or not all(
-        _count(segments.get(key)) for key in SEGMENT_COUNT_KEYS
-    ):
-        raise QuarantineError(f"{where} without segment counts")
-    counts = {key: int(segments[key]) for key in SEGMENT_COUNT_KEYS}
-    linked = len(sent) - counts["unlinked"]
-    sources = counts["sources_quarantined"] + counts["sources_already_open"]
-    if sources > linked or (linked > 0) != (sources > 0):
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise QuarantineError(f"POST {QUARANTINE_PATH} answered without {key}")
+        counts[key] = len(ids)
+        accounted.extend(ids)
+    # `sent` holds no duplicates, so equal sizes and sets mean each id once.
+    if len(accounted) != len(sent) or set(accounted) != set(sent):
         raise QuarantineError(
-            f"{where} {counts['unlinked']} unlinked segments and {sources} "
-            f"sources for the {len(sent)} segments sent"
+            f"POST {QUARANTINE_PATH} answered for {len(accounted)} sources, "
+            f"not the {len(sent)} sent"
         )
     return counts
 
@@ -316,12 +289,8 @@ class FarmClient:
 
 
 def report(farm: FarmClient, requests: list[tuple[list[str], bytes]]) -> dict[str, int]:
-    """Send every request in order; the answers' segment counts, summed.
-
-    A source with segments in two bodies counts once per body (newly
-    quarantined by the first, already open for the second).
-    """
-    totals = dict.fromkeys(SEGMENT_COUNT_KEYS, 0)
+    """Send every request in order; totals per answer list."""
+    totals = dict.fromkeys(ANSWER_KEYS, 0)
     for n, (ids, data) in enumerate(requests, start=1):
         try:
             counts = farm.quarantine(ids, data)
@@ -329,7 +298,7 @@ def report(farm: FarmClient, requests: list[tuple[list[str], bytes]]) -> dict[st
             raise QuarantineError(
                 f"{e} (request {n} of {len(requests)}; {n - 1} sent before it)"
             ) from e
-        for key in SEGMENT_COUNT_KEYS:
+        for key in ANSWER_KEYS:
             totals[key] += counts[key]
     return totals
 
@@ -354,7 +323,7 @@ def main(
     try:
         requests = build_requests(load_rows(args.quarantine))
         if not requests:
-            print("report_quarantine: nothing to quarantine (0 segments)")
+            print("report_quarantine: nothing to quarantine (0 sources)")
             return EXIT_OK
         missing = [n for n in (FARM_URL_ENV, PIPELINE_KEY_ENV) if not os.environ.get(n)]
         if missing:
@@ -366,12 +335,11 @@ def main(
     except QuarantineError as e:
         print(f"report_quarantine: error: {e}", file=sys.stderr)
         return EXIT_ERROR
-    segments = sum(len(ids) for ids, _ in requests)
+    sources = sum(totals.values())
     print(
-        f"report_quarantine: {segments} segments in {len(requests)} request(s): "
-        f"{totals['sources_quarantined']} sources quarantined, "
-        f"{totals['sources_already_open']} already open; {totals['unlinked']} "
-        "segments unlinked (de-linked or gone since the export pull)"
+        f"report_quarantine: {sources} sources in {len(requests)} request(s): "
+        f"{totals['quarantined']} quarantined, {totals['already_open']} already "
+        f"open, {totals['unknown']} unknown (deleted since the export pull)"
     )
     return EXIT_OK
 

@@ -36,8 +36,8 @@ class PipelineConfigsTest(unittest.TestCase):
         pipeline = self.load("pipeline.toml")
         for key in (
             "seed",
-            "window_frames",
-            "window_stride",
+            "window_seconds",
+            "window_stride_seconds",
             "learning_rate",
             "epochs",
             "l2",

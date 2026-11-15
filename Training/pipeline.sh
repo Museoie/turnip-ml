@@ -8,7 +8,7 @@
 #   data/champion/metrics.json              its val metrics (promotion)
 #   data/champion/fixture_scores.json       its recorded fixture scores
 #   $FIXTURE_POSES/<sha256>.tkp1.gz         the fixture set's pose blobs
-#   $INGESTED       segments new since the watermark: the fixture
+#   $INGESTED       sources changed since the watermark: the fixture
 #                   gate's quarantine candidates (needed once the gate runs)
 #
 # Steps: split -> train (fine-tune the champion unless FROM_SCRATCH=true)
@@ -56,7 +56,7 @@
 #                  replaces the champion unless it is clearly worse.
 #   FIXTURES       fixture set (default Training/fixtures/tricks/fixtures.json)
 #   FIXTURE_POSES  its pose blobs (default data/fixture-poses)
-#   INGESTED       JSON array of segment ids (default data/run/ingested.json)
+#   INGESTED       JSON array of source ids (default data/run/ingested.json)
 #   REGISTRY       decision log both gates append to (default
 #                  Training/registry.json; the farm job keeps it in R2)
 #   BOOTSTRAP_CHAMPION  "true" with no champion: promote this challenger
@@ -280,7 +280,7 @@ challenger the first champion."
     case $gate/$promotion in
       regression/*)
         STOP="Fixture gate: regression, so promotion was skipped; \
-$GATE_OUT/quarantine.json lists the new segments. Only the \
+$GATE_OUT/quarantine.json lists the changed sources. Only the \
 workflow's farm job sends it to the farm (Training/report_quarantine.py), \
 before it advances the watermark." ;;
       pass/promote)
@@ -449,7 +449,7 @@ if gate != "not-run":
     m = decision["metrics"]
     print(f"- Fixture gate: {gate} (composite {m['champion']['composite']} -> "
           f"{m['challenger']['composite']}, delta {m['delta']:+}, tolerance "
-          f"{m['tolerance']}; {decision['quarantined_segments']} segments "
+          f"{m['tolerance']}; {decision['quarantined_sources']} sources "
           "quarantined)")
 if promotion in ("promote", "archive"):
     decision = load(run / "promotion.json")

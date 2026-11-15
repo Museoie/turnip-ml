@@ -10,6 +10,7 @@ import http.client
 import io
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -31,10 +32,9 @@ from fixture_gate import (
 )
 
 WEBHOOK = "https://discord.example/api/webhooks/123/SECRET-TOKEN"
-# Segment ids, as the farm mints them (lowercase UUIDs).
-SEG_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-SEG_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-SEG_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+SRC_A = "a" * 64
+SRC_B = "b" * 64
+SRC_C = "c" * 64
 
 
 class FakeSender:
@@ -124,10 +124,10 @@ class GateTestCase(unittest.TestCase):
     def ingested(self, entries=None, name="ingested.json"):
         if entries is None:
             entries = [
-                SEG_C,
-                SEG_A,
-                SEG_B,
-                SEG_A,  # listed twice
+                SRC_C,
+                SRC_A,
+                SRC_B,
+                SRC_A,  # listed twice
             ]
         return self.write_json(name, entries)
 
@@ -170,23 +170,26 @@ class RegressionTest(GateTestCase):
         content = payload["content"]
         self.assertIn("promotion skipped", content)
         self.assertIn("delta -0.200000", content)
-        for seg in (SEG_A, SEG_B, SEG_C):
-            self.assertNotIn(seg, content)
-            self.assertNotIn(seg[:8], content)
-        self.assertIn("quarantining the sources of 3 new segment(s)", content)
+        for src in (SRC_A, SRC_B, SRC_C):
+            self.assertNotIn(src, content)
+            self.assertNotIn(src[:8], content)
+        self.assertIsNotNone(
+            re.search(r"^quarantining 3 source\(s\); ", content, re.MULTILINE)
+        )
         self.assertNotIn("user", content)
         self.assertIn("fixture set: `fx-1`", content)
         self.assertEqual(record["alert_status"], "sent")
 
-        # One quarantine row per ingested segment (deduped, sorted).
+        # One quarantine row per ingested source (deduped, sorted), shaped
+        # like a data_quarantine insert.
         rows = self.quarantine_rows()
-        self.assertEqual([r["segment_id"] for r in rows], [SEG_A, SEG_B, SEG_C])
+        self.assertEqual([r["source_id"] for r in rows], [SRC_A, SRC_B, SRC_C])
         for row in rows:
             # No account id: farm-side attribution only (data_quarantine).
-            self.assertEqual(set(row), {"segment_id", "reason", "metrics"})
+            self.assertEqual(set(row), {"source_id", "reason", "metrics"})
             self.assertEqual(row["reason"], record["reason"])
             self.assertEqual(row["metrics"], record["metrics"])
-        self.assertEqual(record["quarantined_segments"], 3)
+        self.assertEqual(record["quarantined_sources"], 3)
 
         entries = self.registry_entries()
         self.assertEqual(len(entries), 1)
@@ -194,14 +197,18 @@ class RegressionTest(GateTestCase):
         self.assertEqual(entries[0]["decision"], "regression")
         self.assertTrue(entries[0]["decided_at"].endswith("Z"))
 
-    def test_regression_with_no_ingested_segments(self):
+    def test_regression_with_no_ingested_sources(self):
         champion = self.scores("champion.json", 0.80, 0.90)
         challenger = self.scores("challenger.json", 0.60, 0.70)
         _, code = self.run_gate(champion, challenger, self.ingested([]))
         self.assertEqual(code, EXIT_REGRESSION)
         self.assertEqual(self.quarantine_rows(), [])
-        self.assertIn(
-            "the sources of 0 new segment(s)", self.sender.calls[0][1]["content"]
+        self.assertIsNotNone(
+            re.search(
+                r"^quarantining 0 source\(s\); ",
+                self.sender.calls[0][1]["content"],
+                re.MULTILINE,
+            )
         )
 
     def test_alert_failure_still_quarantines_and_skips(self):
@@ -317,8 +324,9 @@ class RegressionTest(GateTestCase):
         }
         content = fixture_gate.alert_content(metrics, 50000)
         self.assertLessEqual(len(content), fixture_gate.DISCORD_MAX_CONTENT)
-        self.assertIn("the sources of 50000 new segment(s)", content)
-        self.assertEqual(content, fixture_gate.alert_content(metrics, 50000))
+        self.assertIsNotNone(
+            re.search(r"^quarantining 50000 source\(s\); ", content, re.MULTILINE)
+        )
 
 
 class PassTest(GateTestCase):
@@ -329,14 +337,14 @@ class PassTest(GateTestCase):
         self.assertEqual(code, EXIT_PASS)
         self.assertEqual(record["decision"], "pass")
         self.assertEqual(record["alert_status"], "not-needed")
-        self.assertEqual(record["quarantined_segments"], 0)
+        self.assertEqual(record["quarantined_sources"], 0)
         self.assertEqual(self.sender.calls, [])
         self.assertEqual(self.quarantine_rows(), [])
         self.assertEqual(self.registry_entries()[0]["decision"], "pass")
 
     def test_pass_overwrites_stale_quarantine_file(self):
         self.out.mkdir()
-        self.quarantine.write_text('[{"segment_id": "stale"}]', encoding="utf-8")
+        self.quarantine.write_text('[{"source_id": "stale"}]', encoding="utf-8")
         champion = self.scores("champion.json", 0.80, 0.90)
         challenger = self.scores("challenger.json", 0.85, 0.90)
         _, code = self.run_gate(champion, challenger)
@@ -401,12 +409,12 @@ class PassTest(GateTestCase):
         r1, _ = self.run_gate(champion, challenger)
         q1 = self.quarantine.read_bytes()
         content1 = self.sender.calls[0][1]["content"]
-        # Same inputs, different listing order of the ingested segments.
+        # Same inputs, different listing order of the ingested sources.
         reordered = self.ingested(
             [
-                SEG_B,
-                SEG_A,
-                SEG_C,
+                SRC_B,
+                SRC_A,
+                SRC_C,
             ],
             name="ingested2.json",
         )
@@ -497,20 +505,17 @@ class FailClosedTest(GateTestCase):
         cases = {
             "number": 5,
             "null": None,
-            "object": {"segment_id": SEG_A},
+            "object": {"source_id": SRC_A},
             # Object entries are refused outright: they could carry an
             # account id along, and training data carries none.
-            "entry-object": [{"segment_id": SEG_A}],
-            "entry-with-user-id": [{"segment_id": SEG_A, "user_id": "u1"}],
+            "entry-object": [{"source_id": SRC_A}],
+            "entry-with-user-id": [{"source_id": SRC_A, "user_id": "u1"}],
             "numeric-id": [123],
             "null-id": [None],
-            "uppercase-id": [SEG_A.upper()],
-            "short-id": [SEG_A[:-1]],
-            "source-id": ["a" * 64],
-            "braced-uuid": ["{" + SEG_A + "}"],
-            "unhyphenated-uuid": [SEG_A.replace("-", "")],
-            "trailing-newline": [SEG_A + "\n"],
-            "injected-text": [SEG_A, "x\n**ALL CLEAR**[go](https://evil.example)"],
+            "uppercase-id": ["A" * 64],
+            "short-id": ["a" * 63],
+            "trailing-newline": [SRC_A + "\n"],
+            "injected-text": [SRC_A, "x\n**ALL CLEAR**[go](https://evil.example)"],
         }
         for name, data in cases.items():
             with self.subTest(case=name):

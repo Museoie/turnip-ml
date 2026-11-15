@@ -19,9 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fixture_gate
 import fixture_runner
-import make_smoke_fixture
 import make_synthetic_fixtures
-import segment_transform
 import tkp1
 import train
 from fixture_runner import (
@@ -42,15 +40,6 @@ SMOKE_CONFIG = REPO / "Training" / "config" / "smoke.toml"
 REAL_SET = REPO / "Training" / "fixtures" / "tricks" / "fixtures.json"
 SHA_A = "a" * 64
 SHA_B = "b" * 64
-# A farm segment id: the fixture gate's quarantine candidates.
-SEGMENT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-
-
-def standing(frames):
-    """A person standing still: a pose the segment transform accepts."""
-    return [
-        [[x, y, 0.9] for x, y in make_smoke_fixture.BASE_POSE] for _ in range(frames)
-    ]
 
 
 def seg(start, end, *names):
@@ -349,7 +338,8 @@ class PoseTest(TempDirTestCase):
         super().setUp()
         self.poses = self.root / "poses"
         self.poses.mkdir()
-        self.blob = tkp1.encode_gz(standing(20))
+        frames = [[[0.5, 0.5, 0.9]] * 17] * 20
+        self.blob = tkp1.encode_gz(frames)
         self.sha = hashlib.sha256(self.blob).hexdigest()
 
     def fixture(self, sha=None, end=12):
@@ -358,20 +348,7 @@ class PoseTest(TempDirTestCase):
     def test_verified_pose_loads(self):
         (self.poses / f"{self.sha}.tkp1.gz").write_bytes(self.blob)
         kps = fixture_runner.load_pose(self.poses, self.fixture())
-        # The model reads the pose after the segment transform (13 joints).
-        self.assertEqual(kps.shape, (20, 13, 3))
-        expected = segment_transform.transform(tkp1.decode_gz(self.blob).keypoints)
-        assert expected is not None
-        np.testing.assert_array_equal(
-            kps, np.array(segment_transform.frames_as_array(expected))
-        )
-
-    def test_a_pose_without_a_torso_is_refused(self):
-        blob = tkp1.encode_gz([[[0.5, 0.5, 0.9]] * 17] * 20)
-        sha = hashlib.sha256(blob).hexdigest()
-        (self.poses / f"{sha}.tkp1.gz").write_bytes(blob)
-        with self.assertRaisesRegex(FixtureError, "no frame has both hips"):
-            fixture_runner.load_pose(self.poses, self.fixture(sha))
+        self.assertEqual(kps.shape, (20, 17, 3))
 
     def test_missing_blob(self):
         with self.assertRaisesRegex(FixtureError, "not found"):
@@ -453,7 +430,7 @@ class RunnerEndToEndTest(TempDirTestCase):
 
     def gate(self, champion, challenger):
         ingested = self.root / "ingested.json"
-        ingested.write_text(json.dumps([SEGMENT]))
+        ingested.write_text(json.dumps(["d" * 64]))
         out = self.root / "gate"
         code = fixture_gate.main(
             [
@@ -521,7 +498,7 @@ class RunnerEndToEndTest(TempDirTestCase):
         self.assertEqual((blind["segment_iou"], blind["name_accuracy"]), (0.0, 0.0))
         code, quarantine = self.gate(champion, challenger)
         self.assertEqual(code, fixture_gate.EXIT_REGRESSION)
-        self.assertEqual([row["segment_id"] for row in quarantine], [SEGMENT])
+        self.assertEqual([row["source_id"] for row in quarantine], ["d" * 64])
 
     def test_scores_from_another_fixture_set_are_refused_by_the_gate(self):
         champion, challenger = (
@@ -568,7 +545,7 @@ class RunnerEndToEndTest(TempDirTestCase):
 
     def test_pose_shorter_than_the_window_is_refused(self):
         window = int(train.load_checkpoint(self.model)["window_frames"])
-        blob = tkp1.encode_gz(standing(window - 1))
+        blob = tkp1.encode_gz([[[0.5, 0.5, 0.9]] * 17] * (window - 1))
         sha = hashlib.sha256(blob).hexdigest()
         (self.poses / f"{sha}.tkp1.gz").write_bytes(blob)
         data = json.loads(self.fixtures.read_text())

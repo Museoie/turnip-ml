@@ -27,15 +27,17 @@ Artifacts in the out dir:
 
 Sample JSON format (one file per sample in samples_dir):
   {"sample_id": ..., "fps": 10,
-   "keypoints": [[[x, y, score] * 13] * n_frames],  # TKS1 joint order
+   "keypoints": [[[x, y, score] * 17] * n_frames],  # MoveNet-17 order
    "tricks": [{"name": ..., "start_frame": ..., "end_frame": ...,
-               "clip_id": ...?}]}
-Keypoints are on the farm's standard body (TKS1, turnip-farm
-POSE_FORMAT.md §12; Training/segment_transform.py), in torso lengths; a
-missing joint is (0, 0, 0). fetch_dataset.py writes one sample per
-segment, and also label provenance (tricks[].origins and a top-level
-"clips") and the segment's split_bucket; training does not read them, and
-samples without them (the smoke fixture) load the same.
+               "clip_id": ...?}],
+   "held_back_windows": [[start_frame, end_frame], ...]?}
+held_back_windows are clips of a trick with too few contributors
+(fetch_dataset.py, TRAINING_DESIGN.md §6.2): no window that overlaps one,
+or lies within the background margin of one, is trained on. Absent means
+none.
+fetch_dataset.py also writes label provenance (tricks[].origins and a
+top-level "clips"); training does not read it yet, and samples without
+it (the smoke fixture) load the same.
 The tricks become segments through evaluate.ground_truth_segments, the
 rule the holdout evaluation scores against: one segment per distinct
 window with every name labeled on it. Multi-name segments label the
@@ -66,7 +68,6 @@ except ModuleNotFoundError:  # Python < 3.11; CI pins 3.12
 import evaluate
 import numpy as np
 import numpy.typing as npt
-import segment_transform
 
 # ---------------------------------------------------------------------------
 # Config
@@ -80,8 +81,8 @@ CONFIG_SCHEMA: dict[str, type | tuple[type, ...]] = {
     "split_path": str,
     "samples_dir": str,
     "out_dir": str,
-    "window_frames": int,
-    "window_stride": int,
+    "window_seconds": (float, int),
+    "window_stride_seconds": (float, int),
     "learning_rate": (float, int),
     "epochs": int,
     "l2": (float, int),
@@ -121,8 +122,8 @@ def load_config(path: Path) -> dict[str, Any]:
             f"config {path}: compute must be one of {COMPUTE_CHOICES}, "
             f"got {cfg['compute']!r}"
         )
-    if cfg["window_frames"] <= 0 or cfg["window_stride"] <= 0:
-        raise ValueError("window_frames and window_stride must be positive")
+    if not (cfg["window_seconds"] > 0 and cfg["window_stride_seconds"] > 0):
+        raise ValueError("window_seconds and window_stride_seconds must be positive")
     if cfg["epochs"] <= 0:
         raise ValueError("epochs must be positive")
     if not cfg["learning_rate"] > 0:
@@ -135,7 +136,33 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("background_ratio must be in [0, 1)")
     if not cfg["background_margin_seconds"] >= 0:
         raise ValueError("background_margin_seconds must be non-negative")
+    window_params(cfg)  # each duration is a whole number of frames
     return cfg
+
+
+def seconds_to_frames(seconds: float, key: str) -> int:
+    """A config duration in seconds as frames at the canonical POSE_FPS.
+
+    Fails closed unless it is a whole number of frames: 1.55 s at 10 Hz
+    would otherwise round silently to a window the config never named.
+    """
+    frames = float(seconds) * POSE_FPS
+    whole = round(frames)
+    if abs(frames - whole) > 1e-9:
+        raise ValueError(f"{key} must be a whole number of frames at {POSE_FPS} Hz")
+    return whole
+
+
+def window_params(cfg: dict[str, Any]) -> tuple[int, int, int]:
+    """(window_frames, window_stride, background_margin_frames) of a
+    validated config."""
+    return (
+        seconds_to_frames(cfg["window_seconds"], "window_seconds"),
+        seconds_to_frames(cfg["window_stride_seconds"], "window_stride_seconds"),
+        seconds_to_frames(
+            cfg["background_margin_seconds"], "background_margin_seconds"
+        ),
+    )
 
 
 def _select_backend(compute: str) -> types.ModuleType:
@@ -160,13 +187,8 @@ def _select_backend(compute: str) -> types.ModuleType:
 
 SPLITS = ("train", "val", "holdout")
 BACKGROUND = "background"
-N_KEYPOINTS = segment_transform.N_JOINTS  # 13, TKS1 order (MODEL_CONTRACT.md §3.6)
-# The root is the midpoint of the TKS1 hips.
-HIP_JOINTS = (
-    segment_transform.JOINTS.index("left_hip"),
-    segment_transform.JOINTS.index("right_hip"),
-)
-POSE_FPS = 10  # canonical pose rate; converts the §2.5 margin from seconds to frames
+N_KEYPOINTS = 17  # MoveNet-17 order, 10 Hz canonical (master plan, TKP1)
+POSE_FPS = 10  # canonical pose rate; converts the config's durations to frames
 
 
 def load_split(path: Path) -> dict[str, str]:
@@ -228,6 +250,7 @@ def load_samples(
         if not isinstance(tricks, list):
             raise TypeError(f"sample {sid!r}: tricks must be a list")
         evaluate.ground_truth_segments(tricks, f"sample {sid!r}")  # fail closed
+        held_back_windows(rec)  # fail closed
         by_id[sid] = rec
     missing_files = sorted(set(split) - set(by_id))
     if missing_files:
@@ -311,35 +334,38 @@ def label_for_window(
 def featurize_window(
     xp: types.ModuleType, window: npt.NDArray[np.float64]
 ) -> npt.NDArray[np.float64]:
-    """52-dim feature: per-joint mean position about the window's root, then
-    per-joint mean speed (MODEL_CONTRACT.md §3.6.2).
+    """68-dim feature: per-joint mean position + per-joint mean speed.
 
-    The features don't depend on where the sequence was centered, so the
-    farm's per-segment center and the client's per-take center give the
-    same features. A joint is present iff its confidence is > 0 (missing
-    joints are zeros).
-    - Root: the window's mean hip midpoint over frames with both hips
-      present; 0 when no frame has them.
-    - Position: per joint, the mean over the window's W frames of
-      (position - root) where the joint is present, 0 where it is missing.
-    - Speed: per joint, the mean over the W - 1 frame pairs of the absolute
-      x and y change, counting only pairs where the joint is present in
-      both frames. Absolute: signed means cancel out over full oscillation
-      periods, while speed separates "moving" from "static", and the x/y
-      split separates horizontal tricks from vertical ones.
-    Output layout: [joint 0 x, joint 0 y, ..., joint 12 y] positions, then
-    the same for speeds, as Training/export_coreml.py computes them.
+    Speed is the mean *absolute* velocity per axis: signed means cancel out
+    over full oscillation periods (a trick window then looks static), while
+    speed separates "moving" from "static" and the x/y split separates
+    horizontal tricks (corkscrew) from vertical ones (gainer).
     """
-    pos = window[:, :, :2]  # [W, J, 2]
-    present = (window[:, :, 2] > 0).astype(pos.dtype)  # [W, J]
-    left, right = HIP_JOINTS
-    hips = present[:, left] * present[:, right]  # [W]
-    root_sum = (hips[:, None] * (pos[:, left] + pos[:, right]) / 2).sum(axis=0)
-    root = root_sum / max(float(hips.sum()), 1.0)  # [2]; 0 without hips
-    centered = pos.mean(axis=0) - root[None, :] * present.mean(axis=0)[:, None]
-    pairs = present[1:] * present[:-1]  # [W-1, J]
-    speed = (xp.abs(pos[1:] - pos[:-1]) * pairs[:, :, None]).mean(axis=0)
-    return xp.concatenate([centered.ravel(), speed.ravel()])
+    pos = window[:, :, :2]  # [W, 17, 2]
+    vel = pos[1:] - pos[:-1]  # [W-1, 17, 2]
+    speed = xp.abs(vel).mean(axis=0)  # [17, 2]: mean |vx|, |vy| per joint
+    return xp.concatenate([pos.mean(axis=0).ravel(), speed.ravel()])
+
+
+def held_back_windows(sample: dict[str, Any]) -> list[tuple[int, int]]:
+    """A sample's held_back_windows ([start_frame, end_frame) pairs from
+    fetch_dataset.py; absent means none), validated."""
+    windows = sample.get("held_back_windows", [])
+    where = f"sample {sample['sample_id']!r} held_back_windows"
+    if not isinstance(windows, list):
+        # ValueError, like every other sample check: callers catch it.
+        raise ValueError(f"{where} must be a list")  # noqa: TRY004
+    out = []
+    for w in windows:
+        if not (
+            isinstance(w, list)
+            and len(w) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in w)
+            and 0 <= w[0] < w[1]
+        ):
+            raise ValueError(f"{where} entries must be [start, end] frames")
+        out.append((w[0], w[1]))
+    return out
 
 
 def build_dataset(
@@ -355,6 +381,12 @@ def build_dataset(
     predicted windows back into trick segments. Windows in the background
     margin (§2.5) are excluded entirely — no row, so they never enter the
     background pool — rather than labeled background.
+
+    Held-back clips (TRAINING_DESIGN.md §6.2: a trick with too few
+    contributors) are excluded the same way: a window that overlaps a
+    sample's held_back_windows, or lies within margin_frames of one, has
+    no row, so the held-back trick trains neither as a name nor as
+    background.
     """
     feats: list[npt.NDArray[np.float64]] = []
     labels: list[str] = []
@@ -365,8 +397,15 @@ def build_dataset(
         segments = evaluate.ground_truth_segments(
             s.get("tricks", []), f"sample {s['sample_id']!r}"
         )
+        held_back = held_back_windows(s)
         for start in range(0, n - window_frames + 1, window_stride):
             end = start + window_frames
+            # The gap is negative when the window overlaps the clip.
+            if any(
+                max(h_start - end, start - h_end) < margin_frames
+                for h_start, h_end in held_back
+            ):
+                continue
             label = label_for_window(segments, start, end, margin_frames)
             if label is None:
                 continue
@@ -642,8 +681,7 @@ def run(config_path: Path, out_override: str | None) -> dict[str, Any]:
     train_samples, val_samples = load_samples(resolve(cfg["samples_dir"]), split)
     name_counts = train_name_counts(train_samples)
 
-    W, S = cfg["window_frames"], cfg["window_stride"]
-    margin_frames = round(float(cfg["background_margin_seconds"]) * POSE_FPS)
+    W, S, margin_frames = window_params(cfg)
     Xtr_raw, ytr_labels, _ = build_dataset(xp, train_samples, W, S, margin_frames)
     Xva_raw, yva_labels, va_prov = build_dataset(xp, val_samples, W, S, margin_frames)
 
