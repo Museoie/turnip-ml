@@ -93,6 +93,16 @@ what those PRs implement, it says so explicitly.
   - Until one lands, every nightly run tries again. Data deleted right
     after a full retrain leaves the published model within about 30
     days, plus any nights a gate refuses the refresh.
+  - **Overdue alert.** A refused refresh keeps the champion. The first
+    refused night is recorded in the same state file (`refused_since`),
+    and once the refresh has been refused for 7 days in a row
+    (`OVERDUE_ALERT_DAYS`), every further refused night sends the
+    fixture gate's Discord alert, counts only: the days overdue and the
+    gate that refused (`fixture_gate`, `membership_inference`,
+    `promotion`, or `not_run` when the gates did not run). Days count
+    calendar days from the first refused night, so a night that failed
+    for another reason does not reset them; a from-scratch champion
+    landing does. *(Judgment call on 7 days, §10 Q12.)*
 
 ### 2.2 Canonicalization (raw → canonical)
 
@@ -783,9 +793,11 @@ one review can clear.
     distinct contributors before a trick ships is a starting point. The
     retrain schedule that bounds how long deleted data stays in a model
     (§2.1) is a starting point too: a from-scratch retrain every 30 days
-    that replaces the champion unless it is more than 2% worse. Open:
-    what to do when a gate keeps refusing the refresh, beyond retrying
-    nightly.
+    that replaces the champion unless it is more than 2% worse. A
+    refresh refused 7 days in a row alerts on Discord every refused
+    night after, and keeps retrying nightly (§2.1); 7 is a starting
+    point. Open: whether a long-overdue refresh should ever replace the
+    champion without passing its gates.
 13. Admin-curated holdout (§2.6) — *resolved.* The farm flags the
     curated footage per export row (`holdout`), and the holdout split is
     exactly the flagged sources; the pipeline keeps no id list. A

@@ -340,20 +340,25 @@ jobs:
           echo "stored champion version $version"
 
       # Only once the champion is stored: a from-scratch challenger that
-      # became the champion restarts the retrain cycle.
+      # became the champion restarts the retrain cycle. A refused scheduled
+      # retrain records its first refused night instead, and once it is
+      # OVERDUE_ALERT_DAYS overdue each refused night sends the Discord
+      # alert (counts and the gate's name only); the champion stays and the
+      # next night retries.
       - if: steps.count.outputs.run == 'true'
-        name: Record a full retrain
+        name: Record a full retrain, or an overdue one
         run: |
           python Training/retrain_schedule.py record \
             --state data/state/retrain_state.json --today "$(date -u +%F)" \
             --outcome data/run/outcome.json > data/retrain_record.json
-          if python -c 'import json, sys; sys.exit(0 if json.load(open("data/retrain_record.json"))["recorded"] else 1)'; then
+          cat data/retrain_record.json
+          if python -c 'import json, sys; sys.exit(0 if json.load(open("data/retrain_record.json"))["state_changed"] else 1)'; then
             aws --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
               s3 cp --only-show-errors data/state/retrain_state.json \
               "s3://${R2_BUCKET}/training/state/retrain_state.json"
-            echo "recorded a full retrain"
+            echo "stored the retrain state"
           else
-            echo "no full retrain to record"
+            echo "retrain state unchanged"
           fi
 
       - if: steps.count.outputs.run == 'true'

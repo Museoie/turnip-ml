@@ -217,8 +217,10 @@ The workflow has two modes:
      champion version, and only then rewrites `champion/current.json`, so
      an upload that fails partway changes nothing; then
      `retrain_schedule.py record` notes today as the last full retrain
-     when a from-scratch challenger became the champion; stores the
-     decision log;
+     when a from-scratch challenger became the champion, or, for a
+     refused scheduled retrain, its first refused night, and from the
+     7th refused day sends a counts-only Discord alert (days overdue and
+     the refusing gate) each refused night; stores the decision log;
   8. after a fixture regression, sends `quarantine.json` to the farm with
      `report_quarantine.py` (below): the export leaves the suspect
      sources out until the maintainer releases or purges them;

@@ -295,9 +295,13 @@ def send_discord(url: str, payload: dict[str, Any]) -> None:
 
 
 def deliver_alert(
-    content: str, webhook_url: str | None, send: AlertSender | None
+    content: str,
+    webhook_url: str | None,
+    send: AlertSender | None,
+    who: str = "fixture_gate",
 ) -> str:
-    """Send the alert; returns the `alert_status` recorded in the registry."""
+    """Send the alert; returns its status ("sent", "not-configured" or
+    "failed: <reason>"). `who` names the script in the stderr line."""
     if not webhook_url:
         status = "not-configured"
     elif not webhook_url.startswith("https://"):
@@ -314,7 +318,7 @@ def deliver_alert(
             # http.client.InvalidURL a malformed URL raises) would print the
             # webhook URL, token included, in its traceback.
             status = f"failed: {_describe(e)}"
-    print(f"fixture_gate: alert not delivered ({status})", file=sys.stderr)
+    print(f"{who}: alert not delivered ({status})", file=sys.stderr)
     return status
 
 
