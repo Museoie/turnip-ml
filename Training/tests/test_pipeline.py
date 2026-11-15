@@ -41,8 +41,7 @@ def run_pipeline(cwd, **env):
     full_env = {k: os.environ[k] for k in INHERITED_ENV if k in os.environ}
     full_env.update(
         PATH=f"{BIN}{os.pathsep}{os.environ.get('PATH', '')}",
-        HOLDOUT_IDS="data/holdout_ids.txt",
-        SPLIT_RATIOS="0.5 0.25 0.25",
+        SPLIT_RATIOS="0.5 0.5",
         FIXTURES="data/fixtures/fixtures.json",
         FIXTURE_POSES="data/fixtures/poses",
         INGESTED="data/ingested.json",
@@ -74,7 +73,7 @@ def setUpModule():
     wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
     wrapper.chmod(0o755)
     # The template every test copies: Training/, the smoke dataset, a
-    # synthetic fixture set, pinned holdout ids, and a seed champion
+    # synthetic fixture set, source-c flagged holdout, and a seed champion
     # bootstrapped once from them.
     TEMPLATE = base / "template"
     shutil.copytree(
@@ -83,17 +82,22 @@ def setUpModule():
         ignore=shutil.ignore_patterns("__pycache__", "registry.json"),
     )
     set_mi_constants(TEMPLATE, MI_LENIENT)
-    for script, out in (
-        ("make_smoke_fixture.py", "data/dataset"),
-        ("make_synthetic_fixtures.py", "data/fixtures"),
+    for script, *args in (
+        (
+            "make_smoke_fixture.py",
+            "--out",
+            "data/dataset",
+            "--holdout-source",
+            "source-c",
+        ),
+        ("make_synthetic_fixtures.py", "--out", "data/fixtures"),
     ):
         subprocess.run(
-            [sys.executable, f"Training/{script}", "--out", out],
+            [sys.executable, f"Training/{script}", *args],
             cwd=TEMPLATE,
             check=True,
             capture_output=True,
         )
-    (TEMPLATE / "data" / "holdout_ids.txt").write_text("smoke-008\n")
     (TEMPLATE / "data" / "ingested.json").write_text("[]\n")
     result = run_pipeline(TEMPLATE, BOOTSTRAP_CHAMPION="true")
     if result.returncode != 0:
@@ -283,6 +287,18 @@ class StopsTest(PipelineTestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("add fixtures first", result.stderr)
         self.assertFalse(self.run_dir.exists())  # refused before training
+
+    def test_a_dataset_with_no_holdout_flag_stops_before_training(self):
+        manifest = self.root / "data" / "dataset" / "manifest.jsonl"
+        rows = [json.loads(line) for line in manifest.read_text().splitlines()]
+        self.assertTrue(any(r.get("holdout") for r in rows))
+        manifest.write_text(
+            "".join(json.dumps({**r, "holdout": False}) + "\n" for r in rows)
+        )
+        result = self.pipeline()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no sample is flagged holdout", result.stderr)
+        self.assertFalse((self.run_dir / "challenger" / "model.npz").exists())
 
 
 class GatesTest(PipelineTestCase):

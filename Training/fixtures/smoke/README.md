@@ -9,7 +9,9 @@ training-pipeline bug, not data noise.
 - `manifest.jsonl` — one `{"sample_id", "source_id"}` per line (splitter
   input); `source_id` groups samples as if cut from one source video
 - `split.json` — `{sample_id: train|val|holdout}`, produced by the real
-  `split_dataset.py` (turnip-ml#12), `--seed 0`
+  `split_dataset.py` (turnip-ml#12), `--seed 0` at 75/25 train/val (no
+  sample is flagged holdout, and three sources leave the 90/10 default
+  no val)
 - `samples/*.json` — one sample per file (see `train.py` docstring for format)
 
 Regenerate byte-identically with:
@@ -18,7 +20,8 @@ Regenerate byte-identically with:
 python Training/make_smoke_fixture.py --out Training/fixtures/smoke --seed 0
 python Training/split_dataset.py \
   --in Training/fixtures/smoke/manifest.jsonl \
-  --out Training/fixtures/smoke/split.json --seed 0
+  --out Training/fixtures/smoke/split.json --seed 0 \
+  --train-ratio 0.75 --val-ratio 0.25
 ```
 
 This fixture is synthetic test data (a few KB of JSON), not a training

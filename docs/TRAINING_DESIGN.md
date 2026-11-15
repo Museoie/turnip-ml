@@ -195,9 +195,14 @@ pinned `taxonomy_version` (above).
 
 ### 2.6 Splits (aligns with PR #17)
 
-- Grouped by `source_id`, target 80/10/10 train/val/holdout: all clips
-  of one source land in one split. (PR #17 groups by `user_id`; it
-  needs to group by `source_id`.)
+- **Holdout is the farm's flag.** Each export row carries `holdout`, the
+  farm's mark on the maintainer-curated holdout footage; a missing field
+  means false. The holdout split is exactly the flagged sources. Rows of
+  one source that disagree, or a value that is not a boolean, fail the
+  build. A dataset with no flagged source stops the pipeline before
+  training: there would be nothing to evaluate on.
+- Train and val split the rest, grouped by `source_id`, target 90/10:
+  all clips of one source land in one split.
 - **Person leakage is a measured risk.** The export carries no account
   identifier (§1), so one person's different videos can land in both
   train and val. With few contributors this is not a rounding error:
@@ -220,9 +225,9 @@ pinned `taxonomy_version` (above).
     *(Judgment call on both numbers.)*
 - Deterministic: seeded RNG, sorted ids, byte-identical `split.json`
   (PR #17's `split_dataset.py` is the implementation).
-- Admin-curated holdout pinning: a pinned sample id pulls its whole
-  source into holdout — the poisoning-defense anchor. The holdout set
-  stays admin-curated (master plan §6), composed as above.
+- The flagged holdout is the poisoning-defense anchor. It stays
+  admin-curated (master plan §6), composed as above; the farm, not a
+  pipeline-side id list, names it.
 - The holdout split is **never loaded for training** — enforced at load
   time by the training script (PR #18), not by convention.
 - The dataset manifest (sample ids, split assignment, taxonomy_version,
@@ -413,9 +418,9 @@ estimation is MoveNet's job, and fine-tuning it is off the table
 
 ### 6.2 Holdout protocol
 
-- The holdout split is admin-curated and pinned (PR #17). The evaluator
-  rejects predictions for non-holdout or unknown samples — fail closed,
-  never silently evaluated (PR #19).
+- The holdout split is admin-curated, flagged by the farm (§2.6). The
+  evaluator rejects predictions for non-holdout or unknown samples —
+  fail closed, never silently evaluated (PR #19).
 - The evaluator is decoupled from training: it scores predictions
   files, so it works with any architecture emitting the output contract,
   including the §4.2 proposal, without duplicating model math.
@@ -781,11 +786,11 @@ one review can clear.
     that replaces the champion unless it is more than 2% worse. Open:
     what to do when a gate keeps refusing the refresh, beyond retrying
     nightly.
-13. Admin-curated holdout (§2.6) — with whole recordings a pinned
-    sample id is a source id again, stable across relabels, and pins
-    only its own source. Pinning still needs the maintainer to keep the
-    id list in R2; a farm-side holdout flag on the curated footage would
-    let the farm name it instead.
+13. Admin-curated holdout (§2.6) — *resolved.* The farm flags the
+    curated footage per export row (`holdout`), and the holdout split is
+    exactly the flagged sources; the pipeline keeps no id list. A
+    missing flag is false, so an export from before the field yields no
+    holdout and the pipeline stops before training.
 14. Quarantine (§7) — *resolved.* `report_quarantine.py` sends the
     changed sources' ids as `source_ids` again; the farm's answer is
     checked against them and only counts are printed or alerted.

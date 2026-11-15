@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import evaluate
 import fetch_dataset
 import predict
+import split_dataset
 import tkp1
 import train
 from fetch_dataset import EXIT_ERROR, EXIT_OK, BlobCache, ExportClient, FetchError
@@ -238,6 +239,7 @@ class BuildTest(FetchTestCase):
                 "clips_dropped_without_names": 1,
                 "clips_held_back": 0,
                 "names_held_back": 0,
+                "holdout_samples": 0,
                 "label_rows": 6,
                 "taxonomy_version": 2,
                 "unmapped_tokens": 1,
@@ -377,9 +379,9 @@ class BuildTest(FetchTestCase):
         self.assertEqual(
             [json.loads(line) for line in manifest.splitlines()],
             [
-                {"sample_id": SRC_A, "source_id": SRC_A},
-                {"sample_id": SRC_B, "source_id": SRC_B},
-                {"sample_id": SRC_C, "source_id": SRC_C},
+                {"sample_id": SRC_A, "source_id": SRC_A, "holdout": False},
+                {"sample_id": SRC_B, "source_id": SRC_B, "holdout": False},
+                {"sample_id": SRC_C, "source_id": SRC_C, "holdout": False},
             ],
         )
         meta = json.loads((self.root / "dataset" / "dataset_manifest.json").read_text())
@@ -727,6 +729,56 @@ class RowCanonicalTest(FetchTestCase):
         for bad in ("", "Cork", " cork", "cork  screw", "cork+gainer", 7, ["cork"]):
             with self.subTest(canonical=bad):
                 self.assert_build_refused([row(SRC_B, 3, "Cork", canonical=bad)])
+
+
+class HoldoutFlagTest(FetchTestCase):
+    """A row's holdout: the farm's mark on curated holdout footage."""
+
+    def manifest(self, out="dataset"):
+        path = self.root / out / "manifest.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_flagged_sources_are_marked_holdout_in_the_manifest(self):
+        rows = [{**r, "holdout": True} if r["source_id"] == SRC_C else r for r in ROWS]
+        stats = self.build(FakeExport(rows))
+        self.assertEqual(stats["holdout_samples"], 1)
+        self.assertEqual(
+            self.manifest(),
+            [
+                {"sample_id": SRC_A, "source_id": SRC_A, "holdout": False},
+                {"sample_id": SRC_B, "source_id": SRC_B, "holdout": False},
+                {"sample_id": SRC_C, "source_id": SRC_C, "holdout": True},
+            ],
+        )
+        dataset = json.loads(
+            (self.root / "dataset" / "dataset_manifest.json").read_text()
+        )
+        self.assertEqual(dataset["holdout_samples"], 1)
+
+    def test_a_missing_flag_is_false_and_an_explicit_false_reads_the_same(self):
+        self.build()
+        explicit = [{**r, "holdout": False} for r in ROWS]
+        self.build(FakeExport(explicit), out="explicit")
+        self.assertEqual(self.tree("dataset"), self.tree("explicit"))
+        self.assertFalse(any(m["holdout"] for m in self.manifest()))
+
+    def test_the_manifest_splits_with_the_flagged_source_in_holdout(self):
+        rows = [{**r, "holdout": True} if r["source_id"] == SRC_B else r for r in ROWS]
+        self.build(FakeExport(rows))
+        split = split_dataset.split_records(self.manifest(), require_holdout=True)
+        self.assertEqual(split[SRC_B], "holdout")
+        self.assertLessEqual({split[SRC_A], split[SRC_C]}, {"train", "val"})
+
+    def test_a_non_boolean_flag_is_refused(self):
+        for bad in ("true", 1, None, [True]):
+            with self.subTest(holdout=bad):
+                self.assert_build_refused([row(SRC_A, 1, "cork", holdout=bad)])
+
+    def test_rows_of_one_source_that_disagree_are_refused(self):
+        rows = [row(SRC_A, 1, "cork", holdout=True), row(SRC_A, 2, "hook")]
+        self.assert_build_refused(rows)
+        rows = [row(SRC_A, 1, "cork", holdout=True), row(SRC_A, 1, "hook")]
+        self.assert_build_refused(rows)
 
 
 class RowValidationTest(FetchTestCase):

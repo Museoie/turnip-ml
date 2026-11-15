@@ -42,9 +42,10 @@ build --out DIR --cache DIR
                                 (clip, canonical name) on the clip window,
                                 held_back_windows (below), and the label
                                 provenance (below)
-      manifest.jsonl            {"sample_id", "source_id"} per sample, the
-                                split_dataset.py input (splits group by
-                                source)
+      manifest.jsonl            {"sample_id", "source_id", "holdout"} per
+                                sample, the split_dataset.py input
+                                (splits group by source; holdout is the
+                                farm's flag, below)
       dataset_manifest.json     pinned taxonomy_version and its curated
                                 canonical names, export cursor, the
                                 held-back names, counts and sorted
@@ -64,6 +65,15 @@ build --out DIR --cache DIR
     normalized form and go to the curation queue.
     A label that canonicalizes to no name at all (only parentheticals or
     delimiters) contributes nothing; a clip left without names is dropped.
+
+Holdout flag
+------------
+A row may carry `holdout`, the farm's mark on the maintainer-curated
+holdout footage (TRAINING_DESIGN.md §2.6): true puts the row's source in
+the holdout split, which is never trained on. A missing field means
+false. Anything but a boolean is malformed, and so are rows of one
+source that disagree about it: the flag belongs to the source, and a
+split cannot honor half of one.
 
 Rare-trick hold-back
 --------------------
@@ -190,6 +200,8 @@ ORIGINS = ("typed", "vocabulary", "model")
 # The farm's resolution of trick_name (BACKEND_DESIGN.md §7.3): optional,
 # so an export from before the field still reads.
 CANONICAL_FIELD = "canonical"
+# The farm's mark on curated holdout footage: optional, missing = false.
+HOLDOUT_FIELD = "holdout"
 # The only files the blob cache writes, under <cache>/poses/.
 CACHE_ENTRY_RE = re.compile(r"([0-9a-f]{64})\.tkp1\.gz(\.tmp)?")
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
@@ -220,6 +232,8 @@ class LabelRow:
     # The farm's canonical name; None when it sent null or no field, and
     # the label is canonicalized here instead.
     canonical: str | None = None
+    # The farm's holdout flag for the row's source.
+    holdout: bool = False
 
 
 @dataclass(frozen=True)
@@ -336,6 +350,9 @@ def parse_row(i: int, row: Any) -> LabelRow:
         raise FetchError(
             f'export row {i}: canonical must be null or a normalized name without "+"'
         )
+    holdout = row.get(HOLDOUT_FIELD, False)
+    if not isinstance(holdout, bool):
+        raise FetchError(f"export row {i}: holdout must be a boolean")
     return LabelRow(
         source_id=source_id,
         r2_key=row["r2_key"],
@@ -350,6 +367,7 @@ def parse_row(i: int, row: Any) -> LabelRow:
         suggested_names=tuple(suggested),
         suggestions_withheld=withheld,
         canonical=canonical,
+        holdout=holdout,
     )
 
 
@@ -661,6 +679,8 @@ def _group(rows: list[LabelRow]) -> dict[str, dict[str, list[LabelRow]]]:
         first = next(iter(clips.values()))[0] if clips else row
         if (first.r2_key, first.blob_sha256) != (row.r2_key, row.blob_sha256):
             raise FetchError("rows for one source disagree on its blob")
+        if first.holdout != row.holdout:
+            raise FetchError("rows for one source disagree on its holdout flag")
         clip_rows = clips.setdefault(row.clip_id, [])
         if clip_rows and (clip_rows[0].start_frame, clip_rows[0].end_frame) != (
             row.start_frame,
@@ -736,6 +756,7 @@ def _write_dataset(
     clips_held_back = 0
     held_back_names: set[str] = set()
     sample_ids: list[str] = []
+    holdout_ids: set[str] = set()
     for source_id, clips in sources.items():
         first = next(iter(clips.values()))[0]
         try:
@@ -803,6 +824,8 @@ def _write_dataset(
         path = staging / "samples" / f"{source_id}.json"
         path.write_text(_dump(sample), encoding="utf-8")
         sample_ids.append(source_id)
+        if first.holdout:
+            holdout_ids.add(source_id)
 
     sample_ids.sort()
     stats = {
@@ -813,6 +836,7 @@ def _write_dataset(
         "clips_dropped_without_names": clips_dropped,
         "clips_held_back": clips_held_back,
         "names_held_back": len(held_back_names),
+        "holdout_samples": len(holdout_ids),
         "label_rows": len(pull.rows),
         "taxonomy_version": taxonomy.version,
         "unmapped_tokens": len(unmapped),
@@ -833,7 +857,10 @@ def _write_dataset(
         "sample_ids": sample_ids,
     }
     (staging / "manifest.jsonl").write_text(
-        "".join(_dump({"sample_id": s, "source_id": s}) for s in sample_ids),
+        "".join(
+            _dump({"sample_id": s, "source_id": s, "holdout": s in holdout_ids})
+            for s in sample_ids
+        ),
         encoding="utf-8",
     )
     (staging / "dataset_manifest.json").write_text(

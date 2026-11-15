@@ -46,8 +46,9 @@
 # and gate baseline.
 #
 # Environment:
-#   HOLDOUT_IDS    file of admin-pinned holdout sample ids (optional)
-#   SPLIT_RATIOS   "train val holdout" split targets (default 0.8 0.1 0.1)
+#   SPLIT_RATIOS   "train val" split targets for the sources the farm does
+#                  not flag holdout (default 0.9 0.1); flagged ones are the
+#                  holdout, and a dataset with none is refused
 #   FROM_SCRATCH   "true" trains without data/champion as the base (the
 #                  gates still compare against it)
 #   REFRESH        "true": a scheduled retrain (Training/retrain_schedule.py,
@@ -94,7 +95,7 @@ INGESTED=${INGESTED:-$RUN/ingested.json}
 REGISTRY=${REGISTRY:-Training/registry.json}
 BOOTSTRAP=${BOOTSTRAP_CHAMPION:-false}
 REFRESH=${REFRESH:-false}
-read -r TRAIN_RATIO VAL_RATIO HOLDOUT_RATIO <<<"${SPLIT_RATIOS:-0.8 0.1 0.1}"
+read -r TRAIN_RATIO VAL_RATIO <<<"${SPLIT_RATIOS:-0.9 0.1}"
 SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/null}
 UPDATE=$RUN/champion_update
 GATE_OUT=$RUN/fixture_gate
@@ -142,12 +143,8 @@ rm -rf "$UPDATE" "$GATE_OUT" "$RUN/champion" "$RUN/promotion.json" \
 
 split_args=(
   --in "$DATASET/manifest.jsonl" --out "$RUN/split.json" --seed 0
-  --train-ratio "$TRAIN_RATIO" --val-ratio "$VAL_RATIO"
-  --holdout-ratio "$HOLDOUT_RATIO"
+  --train-ratio "$TRAIN_RATIO" --val-ratio "$VAL_RATIO" --require-holdout
 )
-if [ -n "${HOLDOUT_IDS:-}" ]; then
-  split_args+=(--holdout-ids "$HOLDOUT_IDS")
-fi
 python Training/split_dataset.py "${split_args[@]}"
 
 config=Training/config/pipeline.toml

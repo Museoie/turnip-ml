@@ -14,7 +14,11 @@ the files are byte-stable. Regenerate with:
   python Training/make_smoke_fixture.py --out Training/fixtures/smoke --seed 0
 then split with the real splitter (turnip-ml#12):
   python Training/split_dataset.py --in Training/fixtures/smoke/manifest.jsonl \\
-      --out Training/fixtures/smoke/split.json --seed 0
+      --out Training/fixtures/smoke/split.json --seed 0 \\
+      --train-ratio 0.75 --val-ratio 0.25
+--holdout-source SRC flags SRC's samples "holdout": true in the manifest,
+as the farm flags curated holdout footage (the synthetic pipeline run
+uses it); the committed fixture flags none.
 """
 
 from __future__ import annotations
@@ -108,7 +112,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True, help="fixture dir to write")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--holdout-source",
+        action="append",
+        default=[],
+        help="flag this source's samples holdout (repeatable)",
+    )
     args = parser.parse_args(argv)
+    unknown = sorted(set(args.holdout_source) - {src for _, src, _ in SAMPLES})
+    if unknown:
+        parser.error(f"--holdout-source names no fixture source: {unknown}")
     rng = random.Random(args.seed)
 
     out = Path(args.out)
@@ -129,9 +142,10 @@ def main(argv: list[str] | None = None) -> int:
         with open(samples_dir / f"{sample_id}.json", "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
             fh.write("\n")
-        manifest_lines.append(
-            json.dumps({"sample_id": sample_id, "source_id": source_id})
-        )
+        entry: dict[str, object] = {"sample_id": sample_id, "source_id": source_id}
+        if source_id in args.holdout_source:
+            entry["holdout"] = True
+        manifest_lines.append(json.dumps(entry))
     with open(out / "manifest.jsonl", "w", encoding="utf-8") as fh:
         fh.write("\n".join(manifest_lines) + "\n")
     print(f"wrote {len(SAMPLES)} samples to {samples_dir}")

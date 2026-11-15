@@ -100,16 +100,20 @@ held-back names (`docs/TRAINING_DESIGN.md` §6.2).
 
 ```sh
 python Training/split_dataset.py \
-  --in manifest.jsonl --out split.json --seed 0 \
-  --holdout-ids admin_holdout.txt
+  --in manifest.jsonl --out split.json --seed 0 --require-holdout
 ```
 
-`manifest.jsonl` carries one JSON object per line with `sample_id` and
-`source_id` (extra fields are ignored). Splits group by source because
-training data carries no account identifier (`docs/TRAINING_DESIGN.md`
-§2.6). `admin_holdout.txt` lists the admin-curated holdout sample ids, one
-per line — those samples, and every sibling sample from the same sources,
-are pinned to holdout and never trained on (poisoning defense). `split.json` maps each sample id to
+`manifest.jsonl` carries one JSON object per line with `sample_id`,
+`source_id` and optionally `holdout` (extra fields are ignored); splits
+group by source because training data carries no account identifier
+(`docs/TRAINING_DESIGN.md` §2.6). The holdout is exactly the samples
+flagged `"holdout": true`, the farm's mark on the maintainer-curated
+footage (`fetch_dataset.py` copies it from the export); a missing flag
+means false, and samples of one source that disagree are an error.
+Holdout samples are never trained on (poisoning defense). The other
+sources split train/val at `--train-ratio` / `--val-ratio` (default
+0.9 / 0.1). `--require-holdout` refuses a manifest with no flagged
+sample, as the pipeline does. `split.json` maps each sample id to
 `train` / `val` / `holdout` with sorted keys.
 
 ## Training the champion
@@ -190,8 +194,8 @@ The workflow has two modes:
   records the alert as not configured). Until `TURNIP_FARM_URL` is set it
   does nothing. Otherwise:
   1. restores from `training/` in R2: the watermark, the champion, the
-     gates' decision log (`registry.json`), the pinned holdout ids and
-     the fixture set's pose blobs (`fixtures/poses/`). The champion is the
+     gates' decision log (`registry.json`) and the fixture set's pose
+     blobs (`fixtures/poses/`). The champion is the
      version `champion/current.json` points to
      (`champion/versions/<version>/`: `model.npz`, `metrics.json`,
      `fixture_scores.json`), each file verified against the pointer's

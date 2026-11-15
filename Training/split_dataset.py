@@ -5,23 +5,28 @@ Splits a training-sample manifest into train / validation / holdout sets for
 the trick-detection training pipeline (see Training/README.md).
 
 Contract:
-  - Target ratios 80/10/10 (train/val/holdout), configurable.
+  - Holdout is exactly the samples the farm flags ``"holdout": true``:
+    the maintainer-curated footage (TRAINING_DESIGN.md §2.6), never
+    trained on (poisoning defense). A missing flag means false. The flag
+    belongs to the source: samples of one source that disagree are an
+    error, so a source never straddles the holdout boundary.
+  - The rest is split train/val, target ratios 90/10, configurable.
   - Grouped by ``source_id``: every sample from one source lands in a
     single split, so no source's clips ever leak across splits. Training
     data carries no account identifier, so one person's different sources
-    can land in different splits; the admin-curated holdout is the check
-    on that.
-  - ``holdout_ids`` pins the admin-curated holdout set (poisoning defense):
-    pinned samples are never trained on — and neither are their siblings,
-    because the whole source goes to holdout with them.
+    can land in different splits; the curated holdout is the check on
+    that.
+  - ``--require-holdout`` refuses a manifest with no flagged sample, so
+    the pipeline stops before training rather than at the holdout
+    evaluation.
   - Deterministic and seeded: the same manifest + seed + Python interpreter
     version always produces the byte-identical mapping, so training runs are
     reproducible (CPython does not guarantee ``random.Random`` shuffle order
     stable across interpreter versions).
 
 Source integrity is the hard constraint; the ratios are targets. Sources
-are indivisible, so the realized ratios only approximate 80/10/10 (e.g. a
-single-source manifest lands 100% in train).
+are indivisible, so the realized ratios only approximate 90/10 (e.g. a
+single unflagged source lands 100% in train).
 
 Determinism: all ordering derives from sorted ids plus a seeded
 ``random.Random``; no timestamps, no unseeded RNG, no dict-iteration order
@@ -31,11 +36,9 @@ CPython does not guarantee ``random.Random`` shuffle order across versions.
 
 Usage:
   split_dataset.py --in manifest.jsonl --out split.json [--seed 0]
-                   [--train-ratio 0.8 --val-ratio 0.1 --holdout-ratio 0.1]
-                   [--holdout-ids holdout.txt]
-Input JSONL: one object per line, each with "sample_id" and "source_id"
-(extra fields are ignored). ``--holdout-ids`` is a text file with one
-sample id per line.
+                   [--train-ratio 0.9 --val-ratio 0.1] [--require-holdout]
+Input JSONL: one object per line, each with "sample_id" and "source_id",
+and optionally "holdout" (a boolean; extra fields are ignored).
 Output JSON: {"<sample_id>": "train"|"val"|"holdout"}, keys sorted.
 """
 
@@ -49,20 +52,20 @@ from collections.abc import Iterable, Mapping
 
 SPLITS = ("train", "val", "holdout")
 DEFAULT_SEED = 0
-DEFAULT_RATIOS = (0.8, 0.1, 0.1)
+DEFAULT_RATIOS = (0.9, 0.1)
 
 
-def _check_ratios(train_ratio: float, val_ratio: float, holdout_ratio: float) -> None:
-    ratios = (train_ratio, val_ratio, holdout_ratio)
+def _check_ratios(train_ratio: float, val_ratio: float) -> None:
+    ratios = (train_ratio, val_ratio)
     if any(r < 0 for r in ratios):
         raise ValueError(f"split ratios must be non-negative, got {ratios}")
     if abs(sum(ratios) - 1.0) > 1e-9:
         raise ValueError(f"split ratios must sum to 1.0, got {ratios}")
 
 
-def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str]]:
-    """Validate records into (sample_id, source_id) pairs; fail closed."""
-    pairs: list[tuple[str, str]] = []
+def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str, bool]]:
+    """Validate records into (sample_id, source_id, holdout); fail closed."""
+    pairs: list[tuple[str, str, bool]] = []
     seen: set[str] = set()
     for i, rec in enumerate(records):
         if not isinstance(rec, Mapping):
@@ -74,11 +77,14 @@ def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str]]:
             raise ValueError(
                 f"record {i} needs non-empty sample_id and source_id: {rec!r}"
             )
+        holdout = rec.get("holdout", False)
+        if not isinstance(holdout, bool):
+            raise ValueError(f"record {i}: holdout must be a boolean")  # noqa: TRY004
         sid, src = str(sid), str(src)
         if sid in seen:
             raise ValueError(f"duplicate sample_id: {sid!r}")
         seen.add(sid)
-        pairs.append((sid, src))
+        pairs.append((sid, src, holdout))
     return pairs
 
 
@@ -88,63 +94,50 @@ def split_records(
     seed: int = DEFAULT_SEED,
     train_ratio: float = DEFAULT_RATIOS[0],
     val_ratio: float = DEFAULT_RATIOS[1],
-    holdout_ratio: float = DEFAULT_RATIOS[2],
-    holdout_ids: Iterable[str] = (),
+    require_holdout: bool = False,
 ) -> dict[str, str]:
     """Assign each sample to train/val/holdout, grouped by source_id.
 
     Returns {sample_id: split}. See the module docstring for the contract.
     """
-    _check_ratios(train_ratio, val_ratio, holdout_ratio)
+    _check_ratios(train_ratio, val_ratio)
     pairs = _normalize(records)
-
-    # Validate holdout ids even for an empty manifest: a stale holdout-ids
-    # file against an empty/wrong manifest must fail closed, not silently
-    # write an empty split.json.
-    pinned = {str(h) for h in holdout_ids}
-    known = {sid for sid, _ in pairs}
-    unknown = sorted(pinned - known)
-    if unknown:
-        raise ValueError(f"holdout_ids not present in manifest: {unknown}")
-
-    if not pairs:
-        return {}
 
     # Group samples per source; canonical (sorted) order everywhere for
     # determinism.
     by_source: dict[str, list[str]] = {}
-    for sid, src in pairs:
+    flags: dict[str, bool] = {}
+    for sid, src, holdout in pairs:
         by_source.setdefault(src, []).append(sid)
+        if flags.setdefault(src, holdout) != holdout:
+            raise ValueError("samples of one source disagree on holdout")
     for sids in by_source.values():
         sids.sort()
 
-    assignment: dict[str, str] = {}
-    counts = {s: 0 for s in SPLITS}
+    holdout_sources = sorted(src for src, flagged in flags.items() if flagged)
+    if require_holdout and not holdout_sources:
+        raise ValueError("no sample is flagged holdout: nothing to evaluate on")
+    if not pairs:
+        return {}
 
-    # Admin-curated holdout: a pinned sample pulls its whole source into
-    # holdout, so no source straddles the holdout boundary (poisoning defense).
-    pinned_sources = sorted({src for sid, src in pairs if sid in pinned})
-    for src in pinned_sources:
+    assignment: dict[str, str] = {}
+    for src in holdout_sources:
         for sid in by_source[src]:
             assignment[sid] = "holdout"
-        counts["holdout"] += len(by_source[src])
 
     # Remaining sources: seeded shuffle, then greedy deficit-filling against
     # the ratio targets. The seed decides *which* sources land where; the greedy
     # pass keeps the realized ratios near the targets.
-    total = len(pairs)
-    targets = {
-        "train": train_ratio * total,
-        "val": val_ratio * total,
-        "holdout": holdout_ratio * total,
-    }
+    rest = sorted(src for src, flagged in flags.items() if not flagged)
+    total = sum(len(by_source[src]) for src in rest)
+    targets = {"train": train_ratio * total, "val": val_ratio * total}
+    counts = {"train": 0, "val": 0}
     rng = random.Random(seed)
-    pinned_set = set(pinned_sources)
-    rest = sorted(s for s in by_source if s not in pinned_set)
     rng.shuffle(rest)
+    order = ("train", "val")
     for src in rest:
         # Split with the largest remaining deficit; ties break toward train.
-        best = max(SPLITS, key=lambda s: (targets[s] - counts[s], -SPLITS.index(s)))
+        best = max(order, key=lambda s: (targets[s] - counts[s], -order.index(s)))
         for sid in by_source[src]:
             assignment[sid] = best
         counts[best] += len(by_source[src])
@@ -177,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         "--in",
         dest="inp",
         required=True,
-        help="input manifest as JSONL (sample_id, source_id per line)",
+        help="input manifest as JSONL (sample_id, source_id, holdout? per line)",
     )
     parser.add_argument(
         "--out", dest="out", required=True, help="output JSON path {sample_id: split}"
@@ -190,18 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--train-ratio", type=float, default=DEFAULT_RATIOS[0])
     parser.add_argument("--val-ratio", type=float, default=DEFAULT_RATIOS[1])
-    parser.add_argument("--holdout-ratio", type=float, default=DEFAULT_RATIOS[2])
     parser.add_argument(
-        "--holdout-ids",
-        default=None,
-        help="text file with admin-curated holdout sample ids, one per line",
+        "--require-holdout",
+        action="store_true",
+        help="refuse a manifest with no sample flagged holdout",
     )
     args = parser.parse_args(argv)
-
-    holdout_ids: list[str] = []
-    if args.holdout_ids:
-        with open(args.holdout_ids, "r", encoding="utf-8") as fh:
-            holdout_ids = [ln.strip() for ln in fh if ln.strip()]
 
     records = _read_jsonl(args.inp)
     assignment = split_records(
@@ -209,8 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
-        holdout_ratio=args.holdout_ratio,
-        holdout_ids=holdout_ids,
+        require_holdout=args.require_holdout,
     )
     with open(args.out, "w", encoding="utf-8") as fh:
         fh.write(dump_split(assignment))

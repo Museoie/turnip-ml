@@ -80,8 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      HOLDOUT_IDS: data/holdout_ids.txt
-      SPLIT_RATIOS: '0.5 0.25 0.25'
+      SPLIT_RATIOS: '0.5 0.5'
       FROM_SCRATCH: ${{ inputs.from_scratch || false }}
       FIXTURES: data/fixtures/fixtures.json
       FIXTURE_POSES: data/fixtures/poses
@@ -97,15 +96,15 @@ jobs:
       - name: Install training dependencies
         run: pip install -r Training/requirements.txt
 
-      # source-c (smoke-007/008) pinned to holdout; with 50/25/25 targets
-      # the seeded split puts source-a in train and source-b in val. The
-      # fixture set is synthetic too (make_synthetic_fixtures.py), and no
-      # source changed since any watermark.
+      # source-c (smoke-007/008) flagged holdout, as the farm flags curated
+      # footage; with 50/50 targets the seeded split puts source-a in train
+      # and source-b in val. The fixture set is synthetic too
+      # (make_synthetic_fixtures.py), and no source changed since any
+      # watermark.
       - name: Synthetic dataset and fixture set
         run: |
-          python Training/make_smoke_fixture.py --out data/dataset --seed 0
+          python Training/make_smoke_fixture.py --out data/dataset --seed 0 --holdout-source source-c
           python Training/make_synthetic_fixtures.py --out data/fixtures --seed 0
-          echo smoke-008 > data/holdout_ids.txt
           echo '[]' > data/ingested.json
 
       - name: 'First run: no champion, so bootstrap one'
@@ -203,7 +202,6 @@ jobs:
       #                                   fixture_scores.json (fixture gate
       #                                   baseline); verified on restore
       # training/registry.json            the gates' decision log
-      # training/holdout_ids.txt          admin-pinned holdout, if any
       # training/fixtures/poses/          the fixture set's pose blobs
       #                                   (verified by the fixture runner)
       - if: steps.config.outputs.configured == 'true'
@@ -242,7 +240,6 @@ jobs:
             echo "no champion yet"
           fi
           restore registry.json data/registry.json
-          restore holdout_ids.txt data/holdout_ids.txt
           if r2 ls "$base/fixtures/poses/" > /dev/null; then
             r2 cp --recursive --only-show-errors "$base/fixtures/poses/" data/fixture-poses/
           fi
@@ -310,7 +307,6 @@ jobs:
           PUBLISH: 'true'
           TRAINING_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          if [ -f data/holdout_ids.txt ]; then export HOLDOUT_IDS=data/holdout_ids.txt; fi
           Training/pipeline.sh
 
       - if: steps.count.outputs.run == 'true'
