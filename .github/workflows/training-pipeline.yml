@@ -192,7 +192,8 @@ jobs:
       # training/state/export_state.json  the watermark (never printed: the
       #                                   cursor may embed raw label text;
       #                                   a segment-era id set counts every
-      #                                   row as changed once)
+      #                                   row as new once, with no changed
+      #                                   source)
       # training/state/retrain_state.json the date of the last full
       #                                   (from-scratch) retrain
       # training/champion/current.json    the champion pointer, if any:

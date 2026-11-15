@@ -169,12 +169,24 @@ class TrainTest(unittest.TestCase):
         for old, new in (
             ("window_seconds = 0.8", "window_seconds = 0"),
             ("window_stride_seconds = 0.4", "window_stride_seconds = -0.4"),
+            ("window_seconds = 0.8", "window_seconds = 1e-12"),
+            ("window_stride_seconds = 0.4", "window_stride_seconds = 1e-12"),
         ):
             with (
                 self.subTest(new=new),
-                self.assertRaisesRegex(ValueError, "must be positive"),
+                self.assertRaisesRegex(
+                    ValueError, "must be (positive|a frame or more)"
+                ),
             ):
                 train.load_config(self._rewrite_config(old, new))
+
+    def test_an_infinite_duration_exits_2(self) -> None:
+        for old, new in (
+            ("window_seconds = 0.8", "window_seconds = inf"),
+            ("background_margin_seconds = 2.0", "background_margin_seconds = 1e308"),
+        ):
+            with self.subTest(new=new):
+                self.assertEqual(self._run(config=self._rewrite_config(old, new)), 2)
 
     def test_gpu_compute_fails_closed(self) -> None:
         p = self._rewrite_config('compute = "cpu"', 'compute = "gpu"')

@@ -996,18 +996,30 @@ class MainTest(FetchTestCase):
         )
         self.assertEqual(json.loads(out.read_text()), {"watermark": "cur-5"})
 
-    def test_a_segment_era_state_counts_every_row_once(self):
+    def test_a_segment_era_state_counts_every_row_but_lists_no_source(self):
         state = self.root / "state.json"
         state.write_text('{"segment_ids": ["c11b0000-0000-4000-8000-000000000001"]}')
         out = self.root / "out.json"
+        sources = self.root / "ingested.json"
         code = fetch_dataset.main(
-            ["count", "--state", str(state), "--out-state", str(out)],
+            [
+                "count",
+                "--state",
+                str(state),
+                "--out-state",
+                str(out),
+                "--out-sources",
+                str(sources),
+            ],
             transport=FakeExport(page_size=4),
         )
         self.assertEqual(code, EXIT_OK)
+        # The run goes ahead, but nothing tells tonight's sources apart, so
+        # none is a quarantine candidate (not the whole export).
         self.assertEqual(
-            json.loads(self.stdout.getvalue()), {"new_labels": 6, "changed_sources": 3}
+            json.loads(self.stdout.getvalue()), {"new_labels": 6, "changed_sources": 0}
         )
+        self.assertEqual(json.loads(sources.read_text()), [])
         self.assertEqual(json.loads(out.read_text()), {"watermark": "cur-5"})
 
     def test_malformed_state_file(self):

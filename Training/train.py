@@ -50,6 +50,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import shutil
 import sys
 import types
@@ -136,7 +137,11 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("background_ratio must be in [0, 1)")
     if not cfg["background_margin_seconds"] >= 0:
         raise ValueError("background_margin_seconds must be non-negative")
-    window_params(cfg)  # each duration is a whole number of frames
+    window, stride, _ = window_params(cfg)  # each a whole number of frames
+    if window < 1 or stride < 1:
+        raise ValueError(
+            "window_seconds and window_stride_seconds must be a frame or more"
+        )
     return cfg
 
 
@@ -147,6 +152,8 @@ def seconds_to_frames(seconds: float, key: str) -> int:
     would otherwise round silently to a window the config never named.
     """
     frames = float(seconds) * POSE_FPS
+    if not math.isfinite(frames):
+        raise ValueError(f"{key} must be a finite number of seconds")
     whole = round(frames)
     if abs(frames - whole) > 1e-9:
         raise ValueError(f"{key} must be a whole number of frames at {POSE_FPS} Hz")

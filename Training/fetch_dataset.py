@@ -7,8 +7,7 @@ count --out-state FILE [--state FILE] [--out-sources FILE]
     Pages `GET /api/labels/export?since=<watermark>` and prints
     {"new_labels": N, "changed_sources": M}: the label rows changed since
     the watermark in --state (omit --state on the very first run to count
-    everything; a state the segment pipeline wrote, {"segment_ids": [...]},
-    also counts everything), and the sources they belong to. The newest cursor seen is
+    everything), and the sources they belong to. The newest cursor seen is
     written to --out-state as {"watermark": ...}; the pipeline stores it
     only after the whole run succeeds, so the watermark always means "last
     successful export". --out-sources writes the changed source ids as a
@@ -16,6 +15,12 @@ count --out-state FILE [--state FILE] [--out-sources FILE]
     dataset pull, it covers every new row the challenger trained on, and
     it includes old sources whose labels were edited (a relabel can poison
     as well as a new upload).
+    A state the segment pipeline wrote ({"segment_ids": [...]}) holds no
+    cursor for this export: every row counts as new once, so the run goes
+    ahead, but no source counts as changed (changed_sources 0, an empty
+    --out-sources). Nothing tells tonight's rows from the rest, and
+    listing every source would quarantine the whole dataset on a fixture
+    regression; a regression still skips promotion.
 
 build --out DIR --cache DIR
     Full pull of the export (never incremental: deletions, purges,
@@ -843,13 +848,14 @@ def _write_dataset(
 # -- CLI -----------------------------------------------------------------------
 
 
-def read_state(path: Path) -> str | None:
-    """The watermark: the export cursor of the last successful run.
+# read_state's answer for a state the segment pipeline wrote.
+SEGMENT_ERA_STATE = object()
 
-    A state written while training read segments ({"segment_ids": [...]})
-    holds no cursor for this export, so it reads as no watermark: every
-    label row counts as changed once, on the first run after the switch.
-    """
+
+def read_state(path: Path) -> str | None | object:
+    """The watermark: the export cursor of the last successful run, or
+    SEGMENT_ERA_STATE for a state written while training read segments
+    ({"segment_ids": [...]}), which holds no cursor for this export."""
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -859,7 +865,7 @@ def read_state(path: Path) -> str | None:
         and set(state) == {"segment_ids"}
         and isinstance(state["segment_ids"], list)
     ):
-        return None
+        return SEGMENT_ERA_STATE
     if not isinstance(state, dict) or set(state) != {"watermark"}:
         raise FetchError(f'state file {path} must be {{"watermark": ...}}')
     watermark = state["watermark"]
@@ -917,9 +923,12 @@ def main(
     try:
         client = client_from_env(transport)
         if args.command == "count":
-            since = read_state(args.state) if args.state else None
-            pull = client.pull(since)
-            changed = sorted({row.source_id for row in pull.rows})
+            state = read_state(args.state) if args.state else None
+            segment_era = state is SEGMENT_ERA_STATE
+            pull = client.pull(state if isinstance(state, str) else None)
+            changed = (
+                [] if segment_era else sorted({row.source_id for row in pull.rows})
+            )
             write_state(args.out_state, pull.cursor)
             if args.out_sources:
                 write_json_file(args.out_sources, changed)

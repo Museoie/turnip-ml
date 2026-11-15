@@ -59,8 +59,12 @@ what those PRs implement, it says so explicitly.
   export cursor (the farm's opaque `next_cursor`) of the last successful
   run, stored in the training workspace (not in the farm). It advances
   only when a run completes. A watermark the segment pipeline stored (a
-  set of segment ids) holds no cursor for this export, so it counts
-  every label row as changed once, on the first run after the switch.
+  set of segment ids) holds no cursor for this export, so the first run
+  after the switch counts every label row as new and goes ahead, but
+  lists no source as changed: nothing tells that night's rows from the
+  rest, and listing every source would quarantine the whole dataset on
+  a fixture regression (§7). A regression that night still skips
+  promotion.
 - **Dataset pull.** The dataset itself is always built from a **full
   pull** (no `since`). The export carries no deletions
   (`BACKEND_DESIGN.md` §6): a source deleted by its owner, by account
