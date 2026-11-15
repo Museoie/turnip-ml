@@ -229,9 +229,8 @@ The workflow has two modes:
      when a from-scratch challenger became the champion; stores the
      decision log;
   8. after a fixture regression, sends `quarantine.json` to the farm with
-     `report_quarantine.py` (below). The list holds segment ids, which
-     the farm's endpoint doesn't take yet, so the send fails, and with
-     it the run (`docs/TRAINING_DESIGN.md` §7);
+     `report_quarantine.py` (below): tonight's new segment ids, whose
+     sources the farm quarantines (`docs/TRAINING_DESIGN.md` §7);
   9. advances the watermark. After a regression only once the farm has
      accepted every quarantine request: a failed send fails the run and
      the watermark holds, so the next run's new-segment list still
@@ -330,25 +329,30 @@ python Training/report_quarantine.py --quarantine data/run/fixture_gate/quaranti
 from the environment and, in this order:
 
 1. Validates every row of the gate's `quarantine.json` by the farm's rules
-   before sending anything: `source_id` a farm source id (64 lowercase
-   hex), `reason` non-empty and at most 1000 characters, `metrics` an
-   object or null, no other key, no source listed twice. `synthetic`
-   mode's sources are not farm ids, so it can never quarantine. A
-   segment id is refused with its own message: the farm quarantines
-   sources only, and segments carry none. An empty file sends nothing.
-2. Sends one `POST /api/quarantine` body `{source_ids, reason, metrics}`
+   before sending anything: `segment_id` a farm segment id (a lowercase
+   UUID), `reason` non-empty and at most 1000 characters, `metrics` an
+   object or null, no other key, no segment listed twice. `synthetic`
+   mode's ids are not farm segment ids, so it can never quarantine. An
+   empty file sends nothing.
+2. Sends one `POST /api/quarantine` body `{segment_ids, reason, metrics}`
    per reason and metrics, at most 10000 ids each (the farm's limit), in
-   a fixed order.
-3. Counts a body as sent only when the farm answers 2xx and its
-   `quarantined`, `already_open` and `unknown` lists account for every id
-   sent. `unknown` sources were deleted by their owner after the export
-   pull; that is not an error. A transport failure or a 5xx is retried
+   a fixed order. The farm resolves each segment to the source it was
+   cut from and quarantines that source.
+3. Counts a body as sent only when the farm answers 2xx with an answer
+   consistent with what was sent. The farm answers counts only, never
+   the sources behind the segments: `segments.sources_quarantined`,
+   `segments.sources_already_open` and `segments.unlinked` (segments
+   de-linked by an account deletion, or re-cut or deleted since the
+   export pull: not an error). Its
+   `quarantined`, `already_open` and `unknown` lists cover `source_ids`
+   only, so they must be empty. A transport failure or a 5xx is retried
    (three tries in all); a 401, a 422 or a 3xx fails at once, with exit 2.
    The farm skips sources already under an open quarantine, so a retry
    or a re-run after a failure is safe. Requests never follow a redirect.
 
-It prints counts only: never source ids, nor the farm's error messages (a
-422's details name the offending id).
+It prints counts only: never segment or source ids, nor the farm's error
+messages (a 422's details name the offending id). The fixture gate's
+Discord alert carries counts only too.
 
 Nothing per-sample reaches the log or an artifact in `farm` mode: this
 repository's logs and artifacts are public, so the gates' decision records

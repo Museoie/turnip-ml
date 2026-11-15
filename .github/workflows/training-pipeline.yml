@@ -369,14 +369,13 @@ jobs:
 
       # A fixture regression quarantines tonight's suspect sources
       # farm-side (TRAINING_DESIGN.md §7 step 2): POST /api/quarantine with
-      # the gate's quarantine.json, so the export leaves them out until the
-      # maintainer releases or purges them. The list now holds segment ids,
-      # which the farm's endpoint does not take yet: report_quarantine.py
-      # refuses them, so a regression fails the run and holds the watermark
-      # until the farm can quarantine by segment (§7). It runs after the run record and
-      # the decision log are stored, so a failed send leaves both for
-      # review, fails the run and keeps the watermark held. The farm skips
-      # sources already under quarantine, so the next run just sends again.
+      # the gate's quarantine.json (tonight's new segment ids; the farm
+      # quarantines the source each was cut from), so the export leaves
+      # them out until the maintainer releases or purges them. It runs
+      # after the run record and the decision log are stored, so a failed
+      # send leaves both for review, fails the run and keeps the watermark
+      # held. The farm skips sources already under quarantine, so the next
+      # run just sends again.
       - if: steps.count.outputs.run == 'true'
         id: quarantine
         name: Quarantine the suspect sources farm-side
