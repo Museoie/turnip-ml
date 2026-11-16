@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      SPLIT_RATIOS: '0.5 0.5'
+      VAL_RATIO: '0.5'
       FROM_SCRATCH: ${{ inputs.from_scratch || false }}
       FIXTURES: data/fixtures/fixtures.json
       FIXTURE_POSES: data/fixtures/poses
@@ -97,7 +97,7 @@ jobs:
         run: pip install -r Training/requirements.txt
 
       # source-c (smoke-007/008) flagged holdout, as the farm flags curated
-      # footage; with 50/50 targets the seeded split puts source-a in train
+      # footage; at VAL_RATIO 0.5 the source hash puts source-a in train
       # and source-b in val. The fixture set is synthetic too
       # (make_synthetic_fixtures.py), and no source changed since any
       # watermark.

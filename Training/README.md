@@ -100,7 +100,7 @@ held-back names (`docs/TRAINING_DESIGN.md` §6.2).
 
 ```sh
 python Training/split_dataset.py \
-  --in manifest.jsonl --out split.json --seed 0 --require-holdout
+  --in manifest.jsonl --out split.json --require-holdout
 ```
 
 `manifest.jsonl` carries one JSON object per line with `sample_id`,
@@ -110,10 +110,13 @@ group by source because training data carries no account identifier
 flagged `"holdout": true`, the farm's mark on the maintainer-curated
 footage (`fetch_dataset.py` copies it from the export); a missing flag
 means false, and samples of one source that disagree are an error.
-Holdout samples are never trained on (poisoning defense). The other
-sources split train/val at `--train-ratio` / `--val-ratio` (default
-0.9 / 0.1). `--require-holdout` refuses a manifest with no flagged
-sample, as the pipeline does. `split.json` maps each sample id to
+Holdout samples are never trained on (poisoning defense). Every other
+source goes to val with probability `--val-ratio` (default 0.1) by a
+stable hash of its `source_id`, else to train: its split never depends
+on the other sources, so a source the champion trained on never comes
+back as validation. Realized shares are only near the ratio.
+`--require-holdout` refuses a manifest with no flagged sample, as the
+pipeline does. `split.json` maps each sample id to
 `train` / `val` / `holdout` with sorted keys.
 
 ## Training the champion

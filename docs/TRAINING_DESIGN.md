@@ -211,8 +211,27 @@ pinned `taxonomy_version` (above).
   one source that disagree, or a value that is not a boolean, fail the
   build. A dataset with no flagged source stops the pipeline before
   training: there would be nothing to evaluate on.
-- Train and val split the rest, grouped by `source_id`, target 90/10:
-  all clips of one source land in one split.
+- **Train and val by a stable source hash.** Every other source goes
+  to val iff the first 8 bytes of SHA-256(`turnip-split-v2:` +
+  `source_id`), read as an integer, fall below `val_ratio` of the range
+  (default 0.1), else to train; all clips of one source land in one
+  split. A source's split depends on its own id alone: not on which
+  other sources the export holds, their order, or the Python version.
+  So it is the same on every run, and a new source never moves an old
+  one. That matters because the nightly run fine-tunes the champion: a
+  source it trained on must never come back as validation, where it
+  would inflate the val metric the promotion gate reads (§8) and pose as
+  a non-member in the membership-inference check (§6.2). `val_ratio` is
+  each source's probability of landing in val, so the realized share is
+  only near it, and a small dataset can leave one side short (training
+  refuses an empty val).
+  - *Changed from a seeded shuffle.* Before, the split shuffled all
+    unflagged sources with a seed and cut them greedily toward 90/10,
+    so a new source could move an old one between train and val from
+    one run to the next. No contributed data existed then, so nothing
+    needs migrating, and a champion trained before the change saw no
+    contributed source, so it needs no from-scratch retrain for this;
+    the scheduled retrain (§2.1) replaces it within its cycle anyway.
 - **Person leakage is a measured risk.** The export carries no account
   identifier (§1), so one person's different videos can land in both
   train and val. With few contributors this is not a rounding error:
@@ -233,15 +252,16 @@ pinned `taxonomy_version` (above).
     splits, which links one person's sources to each other but not to
     an account. It does not by itself reopen unlinking (master plan §1).
     *(Judgment call on both numbers.)*
-- Deterministic: seeded RNG, sorted ids, byte-identical `split.json`
-  (PR #17's `split_dataset.py` is the implementation).
+- Deterministic: a pure function of the manifest and `val_ratio`, no
+  RNG, byte-identical `split.json` on any Python version
+  (`split_dataset.py` is the implementation).
 - The flagged holdout is the poisoning-defense anchor. It stays
   admin-curated (master plan §6), composed as above; the farm, not a
   pipeline-side id list, names it.
 - The holdout split is **never loaded for training** — enforced at load
   time by the training script (PR #18), not by convention.
 - The dataset manifest (sample ids, split assignment, taxonomy_version,
-  export watermark, split seed) is written next to the dataset; a
+  export watermark) is written next to the dataset; a
   training run is reproducible from the manifest alone.
 
 ### 2.7 Class balance

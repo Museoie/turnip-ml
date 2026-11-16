@@ -41,7 +41,7 @@ def run_pipeline(cwd, **env):
     full_env = {k: os.environ[k] for k in INHERITED_ENV if k in os.environ}
     full_env.update(
         PATH=f"{BIN}{os.pathsep}{os.environ.get('PATH', '')}",
-        SPLIT_RATIOS="0.5 0.5",
+        VAL_RATIO="0.5",
         FIXTURES="data/fixtures/fixtures.json",
         FIXTURE_POSES="data/fixtures/poses",
         INGESTED="data/ingested.json",

@@ -14,8 +14,7 @@ the files are byte-stable. Regenerate with:
   python Training/make_smoke_fixture.py --out Training/fixtures/smoke --seed 0
 then split with the real splitter (turnip-ml#12):
   python Training/split_dataset.py --in Training/fixtures/smoke/manifest.jsonl \\
-      --out Training/fixtures/smoke/split.json --seed 0 \\
-      --train-ratio 0.75 --val-ratio 0.25
+      --out Training/fixtures/smoke/split.json --val-ratio 0.5
 --holdout-source SRC flags SRC's samples "holdout": true in the manifest,
 as the farm flags curated holdout footage (the synthetic pipeline run
 uses it); the committed fixture flags none.
