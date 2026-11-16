@@ -10,7 +10,16 @@ Contract:
     trained on (poisoning defense). A missing flag means false. The flag
     belongs to the source: samples of one source that disagree are an
     error, so a source never straddles the holdout boundary.
-  - The rest is split train/val, target ratios 90/10, configurable.
+  - Every other source goes to val or train by a stable hash of its
+    ``source_id`` alone (``source_bucket``): val iff the first 8 bytes of
+    SHA-256("turnip-split-v2:" + source_id), read as a big-endian
+    integer, are below ``val_ratio`` * 2**64. A source's split therefore
+    never depends on which other sources are in the manifest, their
+    order, or the Python version, and it is the same on every run: a new
+    source never moves an old one. That matters because the nightly run
+    fine-tunes the champion: a source it trained on must never come back
+    as validation, where it would inflate the val metric and pose as a
+    non-member in the membership-inference check.
   - Grouped by ``source_id``: every sample from one source lands in a
     single split, so no source's clips ever leak across splits. Training
     data carries no account identifier, so one person's different sources
@@ -19,24 +28,21 @@ Contract:
   - ``--require-holdout`` refuses a manifest with no flagged sample, so
     the pipeline stops before training rather than at the holdout
     evaluation.
-  - Deterministic and seeded: the same manifest + seed + Python interpreter
-    version always produces the byte-identical mapping, so training runs are
-    reproducible (CPython does not guarantee ``random.Random`` shuffle order
-    stable across interpreter versions).
+``val_ratio`` (default 0.1) is each source's probability of landing in
+val, not a target the split steers toward: the realized share of sources
+in val is only near it, and the share of samples also depends on how
+many samples each source holds (a small manifest can put every source on
+one side). There is no train ratio and no seed: train is the complement,
+and a seed would only be a second salt that, changed, would reshuffle
+every source.
 
-Source integrity is the hard constraint; the ratios are targets. Sources
-are indivisible, so the realized ratios only approximate 90/10 (e.g. a
-single unflagged source lands 100% in train).
-
-Determinism: all ordering derives from sorted ids plus a seeded
-``random.Random``; no timestamps, no unseeded RNG, no dict-iteration order
-dependence. Input record order does not affect the result. Byte-identical
-reproduction additionally requires the same Python interpreter version:
-CPython does not guarantee ``random.Random`` shuffle order across versions.
+Determinism: the mapping is a pure function of the manifest and
+val_ratio, byte-identical on any Python version; no RNG, timestamps or
+input-order dependence.
 
 Usage:
-  split_dataset.py --in manifest.jsonl --out split.json [--seed 0]
-                   [--train-ratio 0.9 --val-ratio 0.1] [--require-holdout]
+  split_dataset.py --in manifest.jsonl --out split.json
+                   [--val-ratio 0.1] [--require-holdout]
 Input JSONL: one object per line, each with "sample_id" and "source_id",
 and optionally "holdout" (a boolean; extra fields are ignored).
 Output JSON: {"<sample_id>": "train"|"val"|"holdout"}, keys sorted.
@@ -45,22 +51,38 @@ Output JSON: {"<sample_id>": "train"|"val"|"holdout"}, keys sorted.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import random
+import math
 import sys
 from collections.abc import Iterable, Mapping
 
 SPLITS = ("train", "val", "holdout")
-DEFAULT_SEED = 0
-DEFAULT_RATIOS = (0.9, 0.1)
+DEFAULT_VAL_RATIO = 0.1
+# Versions the hash (v1 was the seeded shuffle it replaces): changing it
+# reassigns every source, so it changes only with a deliberate
+# from-scratch retrain.
+SPLIT_SALT = "turnip-split-v2:"
+BUCKET_BITS = 64
 
 
-def _check_ratios(train_ratio: float, val_ratio: float) -> None:
-    ratios = (train_ratio, val_ratio)
-    if any(r < 0 for r in ratios):
-        raise ValueError(f"split ratios must be non-negative, got {ratios}")
-    if abs(sum(ratios) - 1.0) > 1e-9:
-        raise ValueError(f"split ratios must sum to 1.0, got {ratios}")
+def source_bucket(source_id: str) -> int:
+    """The source's fixed position in [0, 2**64): the first 8 bytes of
+    SHA-256(SPLIT_SALT + source_id), big-endian."""
+    digest = hashlib.sha256((SPLIT_SALT + source_id).encode("utf-8")).digest()
+    return int.from_bytes(digest[: BUCKET_BITS // 8], "big")
+
+
+def is_val_source(source_id: str, val_ratio: float) -> bool:
+    """Val iff the source's bucket is below val_ratio of the range. The
+    product is exact: multiplying a float by a power of two only shifts
+    its exponent."""
+    return source_bucket(source_id) < int(val_ratio * 2**BUCKET_BITS)
+
+
+def _check_val_ratio(val_ratio: float) -> None:
+    if not (math.isfinite(val_ratio) and 0 < val_ratio < 1):
+        raise ValueError(f"val_ratio must be in (0, 1), got {val_ratio}")
 
 
 def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str, bool]]:
@@ -91,16 +113,14 @@ def _normalize(records: Iterable[Mapping]) -> list[tuple[str, str, bool]]:
 def split_records(
     records: Iterable[Mapping],
     *,
-    seed: int = DEFAULT_SEED,
-    train_ratio: float = DEFAULT_RATIOS[0],
-    val_ratio: float = DEFAULT_RATIOS[1],
+    val_ratio: float = DEFAULT_VAL_RATIO,
     require_holdout: bool = False,
 ) -> dict[str, str]:
     """Assign each sample to train/val/holdout, grouped by source_id.
 
     Returns {sample_id: split}. See the module docstring for the contract.
     """
-    _check_ratios(train_ratio, val_ratio)
+    _check_val_ratio(val_ratio)
     pairs = _normalize(records)
 
     # Group samples per source; canonical (sorted) order everywhere for
@@ -125,22 +145,14 @@ def split_records(
         for sid in by_source[src]:
             assignment[sid] = "holdout"
 
-    # Remaining sources: seeded shuffle, then greedy deficit-filling against
-    # the ratio targets. The seed decides *which* sources land where; the greedy
-    # pass keeps the realized ratios near the targets.
-    rest = sorted(src for src, flagged in flags.items() if not flagged)
-    total = sum(len(by_source[src]) for src in rest)
-    targets = {"train": train_ratio * total, "val": val_ratio * total}
-    counts = {"train": 0, "val": 0}
-    rng = random.Random(seed)
-    rng.shuffle(rest)
-    order = ("train", "val")
-    for src in rest:
-        # Split with the largest remaining deficit; ties break toward train.
-        best = max(order, key=lambda s: (targets[s] - counts[s], -order.index(s)))
+    # Every other source by its own hash alone, so a source keeps its split
+    # whatever else the manifest holds.
+    for src, flagged in flags.items():
+        if flagged:
+            continue
+        part = "val" if is_val_source(src, val_ratio) else "train"
         for sid in by_source[src]:
-            assignment[sid] = best
-        counts[best] += len(by_source[src])
+            assignment[sid] = part
 
     return assignment
 
@@ -176,13 +188,11 @@ def main(argv: list[str] | None = None) -> int:
         "--out", dest="out", required=True, help="output JSON path {sample_id: split}"
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=DEFAULT_SEED,
-        help="RNG seed; same manifest + seed + interpreter = byte-identical output",
+        "--val-ratio",
+        type=float,
+        default=DEFAULT_VAL_RATIO,
+        help="each unflagged source's probability of landing in val (0 < r < 1)",
     )
-    parser.add_argument("--train-ratio", type=float, default=DEFAULT_RATIOS[0])
-    parser.add_argument("--val-ratio", type=float, default=DEFAULT_RATIOS[1])
     parser.add_argument(
         "--require-holdout",
         action="store_true",
@@ -193,8 +203,6 @@ def main(argv: list[str] | None = None) -> int:
     records = _read_jsonl(args.inp)
     assignment = split_records(
         records,
-        seed=args.seed,
-        train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         require_holdout=args.require_holdout,
     )
@@ -204,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     n = len(assignment)
     by_split = {s: sum(1 for v in assignment.values() if v == s) for s in SPLITS}
     print(
-        f"split {n} samples (seed={args.seed}): "
+        f"split {n} samples (val_ratio={args.val_ratio}): "
         + ", ".join(f"{s}={by_split[s]}" for s in SPLITS),
         file=sys.stderr,
     )
