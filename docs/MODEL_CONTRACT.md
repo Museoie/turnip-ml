@@ -479,7 +479,8 @@ whole-recording `TKP1` pose (§3.1) and the client applies no transform.
   their original `models/` and `reports/` keys; nothing is re-uploaded),
   and its training source list
   re-sent as `training_source_ids` (the registry keeps it,
-  `TRAINING_DESIGN.md` §9); a new unique `version`
+  `TRAINING_DESIGN.md` §9), in pages of 1,000 under the new `version`
+  when it holds more than 1,000 ids, as §2 describes; a new unique `version`
   (`trick-v<major>.<minor>-rb<N>`, e.g. `trick-v1.3-rb1` — versions are
   never re-published, so the rollback needs its own); and
   `promoted_at = now()`. Because "current" is the greatest non-null

@@ -754,8 +754,9 @@ one review can clear.
   versions are never re-published, so the rollback needs its own) with
   `promoted_at = now()`. The manifest follows because "current" is the
   row with the greatest non-null `promoted_at` (BACKEND_DESIGN.md §4).
-  No retraining, no re-point endpoint — see MODEL_CONTRACT.md §5 for
-  the full procedure.
+  A champion trained on more than 1,000 sources re-sends its list in
+  pages, as any publish does (MODEL_CONTRACT.md §2). No retraining, no
+  re-point endpoint — see MODEL_CONTRACT.md §5 for the full procedure.
 
 ## 9. Versioning
 
