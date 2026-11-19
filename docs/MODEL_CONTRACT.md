@@ -171,7 +171,12 @@ Notes:
    `promoted_at` are the farm's; the request omits them) — plus
    `training_source_ids`, the sources the model trained on, which the
    farm records in `model_training_sources` so each owner can see their
-   contribution went in (`BACKEND_DESIGN.md` §1.2.20). The current model
+   contribution went in (`BACKEND_DESIGN.md` §1.2.20). A request carries
+   at most 1,000 ids, so a longer list goes in pages of 1,000: all but
+   the last to `POST /api/models/training-sources` first, keyed by
+   `version` and `sha256`, and the last with the publish, which records
+   them all in its own transaction. A farm without that route answers
+   the first page 404, and nothing is published. The current model
    is defined as the row with the greatest non-null `promoted_at`
    (BACKEND_DESIGN.md §4), so promotion IS the insert — there is no
    `current` flag to flip. Versions are immutable: an existing `version`

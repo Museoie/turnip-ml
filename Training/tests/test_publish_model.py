@@ -76,11 +76,12 @@ RELEASE_CHECK = release_checks.check if HAVE_COREMLTOOLS else stand_in_release_c
 # -- fakes -----------------------------------------------------------------------
 
 
-def farm_validation_error(body: Any) -> str | None:
+def farm_validation_error(body: Any, max_ids: int = 1000) -> str | None:
     """turnip-farm src/models.ts validatePublishInput, rule for rule.
 
     JSON null is neither `undefined` nor a string there, so a null optional
-    field is rejected like any other wrong type.
+    field is rejected like any other wrong type. `max_ids` is the farm's
+    per-request limit: 1000 since the paged route, 100000 before it.
     """
     if not isinstance(body, dict):
         return "body must be a JSON object"
@@ -122,7 +123,7 @@ def farm_validation_error(body: Any) -> str | None:
         return "training_run_id must be a string when present"
     if present("training_source_ids"):
         ids = body["training_source_ids"]
-        if not isinstance(ids, list) or len(ids) > 100000:
+        if not isinstance(ids, list) or len(ids) > max_ids:
             return "training_source_ids must be an array"
         if not all(isinstance(i, str) and HEX64.fullmatch(i) for i in ids):
             return "training_source_ids must be 64-char lowercase hex source ids"
@@ -153,9 +154,20 @@ def error(status: int, code: str) -> tuple[int, Any]:
 
 
 class FakeFarm:
-    """GET /api/models/current + POST /api/models, as turnip-farm serves them."""
+    """GET /api/models/current, POST /api/models and POST
+    /api/models/training-sources, as turnip-farm serves them.
 
-    def __init__(self, current: str | None = None, published: tuple[str, ...] = ()):
+    `paged=False` is a farm from before the paged route: it answers the
+    route 404 and takes up to 100000 ids in the publish.
+    """
+
+    def __init__(
+        self,
+        current: str | None = None,
+        published: tuple[str, ...] = (),
+        paged: bool = True,
+        max_ids: int = 1000,
+    ):
         self.current: dict[str, Any] | None = None
         if current:
             self.current = {
@@ -167,6 +179,14 @@ class FakeFarm:
             }
         self.published = set(published) | ({current} if current else set())
         self.posts: list[dict[str, Any]] = []
+        self.paged = paged
+        self.max_ids = max_ids if paged else 100000
+        # (version, sha256) -> the ids its pages staged, as the farm keys them.
+        self.staged: dict[tuple[str, str], set[str]] = {}
+        self.pages: list[dict[str, Any]] = []
+        self.fail_next_page: int | None = None
+        # version -> every id the publish recorded, pages included.
+        self.recorded: dict[str, set[str]] = {}
         self.fail_next_post: int | None = None
         # Insert the model, then lose the answer (a timeout after commit).
         self.drop_next_answer = False
@@ -191,11 +211,18 @@ class FakeFarm:
                 return error(status, "INTERNAL")
             if set(payload) - FARM_KEYS:
                 raise AssertionError(f"unknown keys sent: {set(payload) - FARM_KEYS}")
-            if farm_validation_error(payload):
+            if farm_validation_error(payload, self.max_ids):
                 return error(422, "VALIDATION_ERROR")
             if payload["version"] in self.published:
                 return error(409, "VERSION_EXISTS")
             self.published.add(payload["version"])
+            staged = self.staged.get((payload["version"], payload["sha256"]), set())
+            self.recorded[payload["version"]] = (
+                set(payload["training_source_ids"]) | staged
+            )
+            self.staged = {
+                k: v for k, v in self.staged.items() if k[0] != payload["version"]
+            }
             self.current = {
                 key: payload[key]
                 for key in ("version", "sha256", "r2_key", "holdout_report_r2_key")
@@ -208,7 +235,38 @@ class FakeFarm:
                 "id": "00000000-0000-4000-8000-000000000001",
                 "version": payload["version"],
                 "promoted_at": "2026-10-19T03:40:00.000Z",
-                "training_sources_recorded": len(set(payload["training_source_ids"])),
+                "training_sources_recorded": len(self.recorded[payload["version"]]),
+            }
+        if (
+            method == "POST"
+            and url == FARM + "/api/models/training-sources"
+            and self.paged
+        ):
+            if headers.get("Authorization") != f"Bearer {KEY}":
+                return error(401, "UNAUTHENTICATED")
+            page = json.loads(body)
+            if set(page) != {"version", "sha256", "training_source_ids"}:
+                raise AssertionError(f"unexpected page keys: {sorted(page)}")
+            if self.fail_next_page is not None:
+                status, self.fail_next_page = self.fail_next_page, None
+                return error(status, "INTERNAL")
+            ids = page["training_source_ids"]
+            if (
+                not HEX64.fullmatch(page["sha256"])
+                or not isinstance(ids, list)
+                or len(ids) > self.max_ids
+                or not all(isinstance(i, str) and HEX64.fullmatch(i) for i in ids)
+            ):
+                return error(422, "VALIDATION_ERROR")
+            if page["version"] in self.published:
+                return error(409, "VERSION_EXISTS")
+            self.pages.append(page)
+            key = (page["version"], page["sha256"])
+            before = len(self.staged.get(key, set()))
+            self.staged.setdefault(key, set()).update(ids)
+            return 200, {
+                "version": page["version"],
+                "training_sources_staged": len(self.staged[key]) - before,
             }
         return error(404, "NOT_FOUND")
 
@@ -510,6 +568,96 @@ class UploadTest(PublishTestCase):
         self.assertEqual(self.main(), 0)
         self.assertEqual(self.r2.puts, 2)  # same bytes: nothing re-uploaded
         self.assertEqual(self.farm.posts[0]["version"], "trick-v1.0")
+
+
+def source_ids(n: int) -> list[str]:
+    return sorted(hashlib.sha256(f"source-{i}".encode()).hexdigest() for i in range(n))
+
+
+class PagedPublishTest(unittest.TestCase):
+    """send_publish against the fake farm: pages of 1,000 ahead of the publish."""
+
+    def body(self, n: int) -> dict[str, Any]:
+        return {
+            "version": "trick-v1.4",
+            "taxonomy_version": 3,
+            "r2_key": "models/trick-v1.4.mlpackage.zip",
+            "sha256": "a" * 64,
+            "holdout_report_r2_key": "reports/trick-v1.4-holdout.json",
+            "training_source_ids": source_ids(n),
+        }
+
+    def send(self, farm: FakeFarm, n: int) -> dict[str, Any]:
+        client = publish_model.FarmClient(FARM, KEY, farm.transport)
+        return publish_model.send_publish(client, self.body(n))
+
+    def test_up_to_one_request_of_ids_goes_in_the_publish_alone(self) -> None:
+        for n in (0, 1, 1000):
+            farm = FakeFarm()
+            self.send(farm, n)
+            self.assertEqual(farm.pages, [])
+            self.assertEqual(farm.posts[0]["training_source_ids"], source_ids(n))
+
+    def test_more_ids_go_in_pages_of_1000_then_the_publish(self) -> None:
+        for n, page_sizes, inline in (
+            (1001, [1000], 1),
+            (2000, [1000], 1000),
+            (2345, [1000, 1000], 345),
+        ):
+            farm = FakeFarm()
+            answer = self.send(farm, n)
+            self.assertEqual(
+                [len(p["training_source_ids"]) for p in farm.pages], page_sizes
+            )
+            self.assertEqual(
+                {(p["version"], p["sha256"]) for p in farm.pages},
+                {("trick-v1.4", "a" * 64)},
+            )
+            self.assertEqual(len(farm.posts[0]["training_source_ids"]), inline)
+            self.assertEqual(farm.recorded["trick-v1.4"], set(source_ids(n)))
+            self.assertEqual(answer["training_sources_recorded"], n)
+
+    def test_a_farm_without_the_paged_route_publishes_nothing(self) -> None:
+        farm = FakeFarm(paged=False)
+        with self.assertRaisesRegex(publish_model.PublishError, "HTTP 404"):
+            self.send(farm, 1001)
+        self.assertEqual(farm.posts, [])
+        self.assertIsNone(farm.current)
+        # Within one request's limit, the same farm still publishes.
+        self.send(farm, 1000)
+        self.assertEqual(farm.recorded["trick-v1.4"], set(source_ids(1000)))
+
+    def test_a_failed_page_publishes_nothing_and_a_rerun_sends_every_page(self) -> None:
+        farm = FakeFarm()
+        farm.fail_next_page = 500
+        with self.assertRaisesRegex(publish_model.PublishError, "HTTP 500"):
+            self.send(farm, 2345)
+        self.assertEqual(farm.posts, [])
+        self.assertIsNone(farm.current)
+        self.send(farm, 2345)
+        self.assertEqual(len(farm.pages), 2)
+        self.assertEqual(farm.recorded["trick-v1.4"], set(source_ids(2345)))
+
+    def test_a_page_for_a_published_version_is_an_error(self) -> None:
+        farm = FakeFarm(published=("trick-v1.4",))
+        with self.assertRaisesRegex(publish_model.PublishError, "VERSION_EXISTS"):
+            self.send(farm, 1001)
+        self.assertEqual(farm.posts, [])
+
+
+class PagedRunTest(PublishTestCase):
+    def test_a_run_with_more_sources_than_one_request_pages_them(self) -> None:
+        train_ids = self.fixture.train_ids
+        self.assertGreater(len(train_ids), 2)
+        farm = FakeFarm(max_ids=2)
+        with mock.patch.object(publish_model, "IDS_PER_REQUEST", 2):
+            self.assertEqual(self.main(farm=farm), 0, self.stderr.getvalue())
+        self.assertTrue(all(len(p["training_source_ids"]) == 2 for p in farm.pages))
+        self.assertEqual(len(farm.pages), (len(train_ids) - 1) // 2)
+        self.assertEqual(farm.recorded["trick-v1.0"], set(train_ids))
+        # The run's record keeps every id, as a rollback re-sends them.
+        request = json.loads((self.challenger / "publish_request.json").read_text())
+        self.assertEqual(request["training_source_ids"], train_ids)
 
 
 class RefusalTest(PublishTestCase):
