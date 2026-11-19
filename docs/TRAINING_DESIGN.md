@@ -754,8 +754,9 @@ one review can clear.
   versions are never re-published, so the rollback needs its own) with
   `promoted_at = now()`. The manifest follows because "current" is the
   row with the greatest non-null `promoted_at` (BACKEND_DESIGN.md §4).
-  No retraining, no re-point endpoint — see MODEL_CONTRACT.md §5 for
-  the full procedure.
+  A champion trained on more than 1,000 sources re-sends its list in
+  pages, as any publish does (MODEL_CONTRACT.md §2). No retraining, no
+  re-point endpoint — see MODEL_CONTRACT.md §5 for the full procedure.
 
 ## 9. Versioning
 
@@ -773,7 +774,8 @@ one review can clear.
   names are added or changed (master plan §2).
 - **What a promoted model publishes beyond its artifact:** its
   `name_metrics` (§6.1) and `training_source_ids`, the `source_id`s of
-  its train split, both sent with `POST /api/models`. The farm turns
+  its train split, both sent with `POST /api/models` (a list over 1,000
+  ids in pages ahead of it, `MODEL_CONTRACT.md` §2). The farm turns
   the list into each owner's `trained_in` (`BACKEND_DESIGN.md`
   §1.2.20). The registry keeps both per version, so a rollback
   re-sends the re-promoted champion's own list (§8).

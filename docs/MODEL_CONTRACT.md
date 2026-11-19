@@ -171,7 +171,12 @@ Notes:
    `promoted_at` are the farm's; the request omits them) — plus
    `training_source_ids`, the sources the model trained on, which the
    farm records in `model_training_sources` so each owner can see their
-   contribution went in (`BACKEND_DESIGN.md` §1.2.20). The current model
+   contribution went in (`BACKEND_DESIGN.md` §1.2.20). A request carries
+   at most 1,000 ids, so a longer list goes in pages of 1,000: all but
+   the last to `POST /api/models/training-sources` first, keyed by
+   `version` and `sha256`, and the last with the publish, which records
+   them all in its own transaction. A farm without that route answers
+   the first page 404, and nothing is published. The current model
    is defined as the row with the greatest non-null `promoted_at`
    (BACKEND_DESIGN.md §4), so promotion IS the insert — there is no
    `current` flag to flip. Versions are immutable: an existing `version`
@@ -474,7 +479,8 @@ whole-recording `TKP1` pose (§3.1) and the client applies no transform.
   their original `models/` and `reports/` keys; nothing is re-uploaded),
   and its training source list
   re-sent as `training_source_ids` (the registry keeps it,
-  `TRAINING_DESIGN.md` §9); a new unique `version`
+  `TRAINING_DESIGN.md` §9), in pages of 1,000 under the new `version`
+  when it holds more than 1,000 ids, as §2 describes; a new unique `version`
   (`trick-v<major>.<minor>-rb<N>`, e.g. `trick-v1.3-rb1` — versions are
   never re-published, so the rollback needs its own); and
   `promoted_at = now()`. Because "current" is the greatest non-null

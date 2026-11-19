@@ -60,15 +60,23 @@ effect, so a bad run uploads nothing.
    holding the same bytes is kept (a retry after a failed publish). Each
    object is read back and its sha256 checked; a mismatch is an error.
 4. POST /api/models with the manifest fields, name_metrics and
-   training_source_ids (the train split's sources). The farm sets
-   model_type and promoted_at. 409 VERSION_EXISTS is an error: bump the
-   version instead. When the answer is lost (a transport failure, a 5xx,
-   a malformed body), GET /api/models/current decides: this version with
-   this sha256 there means the insert landed.
-5. Write challenger/publish_request.json (the exact body) and
-   challenger/publish.json (the farm's answer): the registry keeps both
-   per version, so a rollback can re-send the champion's own lists
-   (MODEL_CONTRACT.md §5).
+   training_source_ids (the train split's sources). A request carries at
+   most 1,000 ids, the farm's limit, so a longer list goes in pages of 1,000:
+   all but the last to POST /api/models/training-sources first, keyed by
+   the version and sha256, and the last with the publish. The farm
+   records the pages in the publish's own transaction, so the model is
+   never current with part of its list. A page that fails stops the run
+   with nothing published, and a rerun sends every page again. A farm
+   without that route answers the first page 404, and nothing is
+   published. The farm sets model_type and promoted_at. 409
+   VERSION_EXISTS is an error: bump the version instead. When the
+   publish's answer is lost (a transport failure, a 5xx, a malformed
+   body), GET /api/models/current decides: this version with this sha256
+   there means the insert landed.
+5. Write challenger/publish_request.json (the whole body, every training
+   source id included) and challenger/publish.json (the farm's answer):
+   the registry keeps both per version, so a rollback can re-send the
+   champion's own lists (MODEL_CONTRACT.md §5).
 
 Requests never follow a redirect: one would carry the pipeline key to
 another host. A 3xx is an error.
@@ -117,7 +125,10 @@ EXIT_OK = 0
 EXIT_ERROR = 2
 
 MODELS_PATH = "/api/models"
+TRAINING_SOURCES_PATH = "/api/models/training-sources"
 CURRENT_PATH = "/api/models/current"
+# The farm's limit on training_source_ids per request.
+IDS_PER_REQUEST = 1000
 HTTP_TIMEOUT_S = 60.0
 MAX_RESPONSE_BYTES = 1024 * 1024
 RUN_ID_ENV = "TRAINING_RUN_ID"
@@ -343,13 +354,35 @@ class FarmClient:
             raise PublishError(f"GET {CURRENT_PATH} answered without a version")
         return body
 
-    def publish(self, body: dict[str, Any]) -> dict[str, Any]:
-        headers = {
+    def _post_headers(self) -> dict[str, str]:
+        return {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "turnip-ml-publish",
         }
+
+    def send_training_sources(self, version: str, sha256: str, ids: list[str]) -> None:
+        """One page of training sources, ahead of the publish they join."""
+        page = {"version": version, "sha256": sha256, "training_source_ids": ids}
+        data = json.dumps(page, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        status, answer = self.transport(
+            "POST", self.base_url + TRAINING_SOURCES_PATH, self._post_headers(), data
+        )
+        if status == 409:
+            raise PublishError(
+                f"{version} is already published (VERSION_EXISTS); "
+                "versions are immutable, publish with --version or --major"
+            )
+        if status != 200:
+            code = _error_code(answer)
+            raise PublishError(
+                f"POST {TRAINING_SOURCES_PATH} failed: HTTP {status}"
+                + (f" {code}" if code else "")
+            )
+
+    def publish(self, body: dict[str, Any]) -> dict[str, Any]:
+        headers = self._post_headers()
         data = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
         try:
             status, answer = self.transport(
@@ -375,6 +408,17 @@ class FarmClient:
                 f"POST {MODELS_PATH} answered 201 without this version"
             )
         return answer
+
+
+def send_publish(farm: FarmClient, body: dict[str, Any]) -> dict[str, Any]:
+    """POST /api/models, the training sources past one request's limit in pages first."""
+    ids = body["training_source_ids"]
+    last_page = max(len(ids) - 1, 0) // IDS_PER_REQUEST * IDS_PER_REQUEST
+    for start in range(0, last_page, IDS_PER_REQUEST):
+        farm.send_training_sources(
+            body["version"], body["sha256"], ids[start : start + IDS_PER_REQUEST]
+        )
+    return farm.publish({**body, "training_source_ids": ids[last_page:]})
 
 
 def next_version(current: dict[str, Any] | None, major: bool) -> str:
@@ -529,7 +573,7 @@ def publish(
     upload_verified(store, body["holdout_report_r2_key"], report, REPORT_TYPE)
     _write_json(challenger / "publish_request.json", body)
     try:
-        answer = farm.publish(body)
+        answer = send_publish(farm, body)
     except OutcomeUnknown:
         landed = farm.current()
         if not (

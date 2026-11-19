@@ -303,9 +303,13 @@ python Training/publish_model.py --run data/run --dataset data/dataset
 4. Uploads the artifact to `models/<version>.mlpackage.zip` and the holdout
    report to `reports/<version>-holdout.json`, reads each back and checks its sha256. It never overwrites a key that
    holds other bytes.
-5. Calls `POST /api/models` and records the request body and the farm's
-   answer in `data/run/challenger/` (`publish_request.json`,
-   `publish.json`). When the answer is lost (timeout, 5xx), the farm's
+5. Calls `POST /api/models` and records the request body, every training
+   source id included, and the farm's answer in `data/run/challenger/`
+   (`publish_request.json`, `publish.json`). A request carries at most
+   1,000 training source ids: past that, all but the last 1,000-id page
+   go first to `POST /api/models/training-sources`, and the farm records
+   them with the publish. A page that fails stops the run with nothing
+   published. When the publish's answer is lost (timeout, 5xx), the farm's
    current model decides whether the insert landed. Requests never follow
    a redirect, which would carry the pipeline key to another host.
 
